@@ -7,3 +7,9 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Claude Code local session data
+.claude/
+
+# Temporary Gradle user home (test execution artifact)
+.gradle-user-home/
