@@ -20,6 +20,19 @@ biomechanical metrics, and player development insights. Comparable product: Home
 
 ## Active Phase
 
+## ⚠️ Phase 0 Spike Override — Single Module
+
+The module structure listed below is the **target architecture for Phase 2+**. It does not exist yet.
+
+For all Phase 0 work:
+- The repo is a **single `:app` module**
+- Do NOT create new Gradle modules
+- Do NOT add Hilt or Room
+- All code lives under `app/src/main/java/com/courtvision/spike/`
+- Existing packages: `camera/`, `pipeline/`
+
+---
+
 **Phase 0 — Technical Spike (8-day plan)**
 
 Goal: Validate that real-time shot detection is achievable on Android using on-device ML

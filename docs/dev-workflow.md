@@ -44,11 +44,18 @@ Use `spike/` for Phase 0 — signals throwaway-safe code that may not survive th
 
 ### 2. Delegate to AI
 
-Split work by AI strength:
-
-**Codex** → Kotlin logic, CameraX inference loop, Kalman filter, shot state machine, Room DAOs, Hilt module wiring, ViewModels, Repositories, UseCases.
-
-**Gemini** → Jetpack Compose UI, XML layouts, multimodal debugging (paste screenshots or Logcat output directly).
+| Task                                                    | AI                             |
+|---------------------------------------------------------|--------------------------------|
+| Kotlin logic — ViewModel, UseCase, Repository           | Codex                          |
+| CameraX inference loop, Kalman filter                   | Codex                          |
+| Shot state machine (IDLE → PREP → RELEASE → FLIGHT → OUTCOME) | Codex                 |
+| Room DAOs, Hilt module wiring                           | Codex                          |
+| TFLite / MediaPipe integration — logic                  | Codex                          |
+| Jetpack Compose UI, screen layouts                      | Gemini                         |
+| Debugging with Logcat output (paste directly)           | Gemini                         |
+| Debugging with UI screenshot (paste directly)           | Gemini                         |
+| Performance analysis with benchmark output              | Gemini                         |
+| TFLite / MediaPipe integration — debug                  | Gemini                         |
 
 Prompt structure every session:
 
@@ -250,20 +257,6 @@ It should contain:
 - Hilt module structure
 - Naming conventions and package structure
 - Key files and their responsibilities
-
----
-
-## AI Coder Split Reference
-
-| Task type | AI to use |
-| --- | --- |
-| Kotlin logic, ViewModel, UseCase, Repository | Codex |
-| CameraX inference loop, Kalman filter | Codex |
-| Shot state machine (IDLE → PREP → RELEASE → FLIGHT → OUTCOME) | Codex |
-| Room DAOs, Hilt modules | Codex |
-| Jetpack Compose UI, XML layouts | Gemini |
-| Debugging with Logcat output or screenshot | Gemini |
-| TFLite / MediaPipe integration | Codex (logic) + Gemini (debug) |
 
 ---
 
