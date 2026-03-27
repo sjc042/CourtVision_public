@@ -1,6 +1,25 @@
 # ❗ Issues Log
 
 Tracking findings, risks, and issues discovered during development.
+Issues are tracked on GitHub: [sjc042/Court-Vision Issues](https://github.com/sjc042/Court-Vision/issues)
+
+---
+
+## GitHub Issues Index
+
+| GH# | Title | Priority | Milestone | Source |
+|-----|-------|----------|-----------|--------|
+| [#1](https://github.com/sjc042/Court-Vision/issues/1) | Fix double-counted drop counter in FrameProcessor | Critical | Day 3 | ISSUE-001 |
+| [#2](https://github.com/sjc042/Court-Vision/issues/2) | Add Phase 0 single-module override to CONTEXT.md | Critical | Day 3 | ISSUE-002 |
+| [#3](https://github.com/sjc042/Court-Vision/issues/3) | Define frame scheduling strategy for combined pipeline | Critical | Day 5 | ISSUE-003 + Day1 #4 |
+| [#4](https://github.com/sjc042/Court-Vision/issues/4) | Consolidate MVP scope to single canonical definition | High | Day 5 | ISSUE-004 + Day1 #2 |
+| [#5](https://github.com/sjc042/Court-Vision/issues/5) | Update TDD to reflect ADR-001 and remove stale references | High | Day 5 | ISSUE-005 + Day1 #1 |
+| [#6](https://github.com/sjc042/Court-Vision/issues/6) | Add acceptance criteria for US-13 through US-18 | High | Day 5 | ISSUE-006 + Day1 #6 |
+| [#7](https://github.com/sjc042/Court-Vision/issues/7) | Unify device test matrix across all docs | Medium | Day 5 | Day1 #5 |
+| [#8](https://github.com/sjc042/Court-Vision/issues/8) | Add FSM transition threshold table to TDD | Medium | Phase 2 | ISSUE-007 |
+| [#9](https://github.com/sjc042/Court-Vision/issues/9) | Add pipeline architecture diagram to TDD | Medium | Phase 2 | ISSUE-008 |
+| [#10](https://github.com/sjc042/Court-Vision/issues/10) | Define ARCore fallback UX and add US-09b | Medium | Phase 3 | ISSUE-009 + Day1 #7 |
+| [#11](https://github.com/sjc042/Court-Vision/issues/11) | Create privacy and data retention spec | Low | Pre-launch | ISSUE-010 + Day1 #8,#9 |
 
 ---
 
@@ -34,3 +53,452 @@ Tracking findings, risks, and issues discovered during development.
 4. Publish one device-and-mode gate matrix with explicit pass criteria.
 5. Add story points + owner + target sprint for all P0/P1 items.
 6. Add a privacy/data-retention spec before implementation starts.
+
+
+## Phase 0 Day 2 — 2026-03-26
+
+**Reviewed Sources**
+- All source files in `CourtVision_Android/app/src/main/java/`
+- All docs in `docs/` including PRD, TDD, user stories, spike plan, ADR-001, dev workflow
+- Cross-referenced with ChatGPT doc review (2026-03-26)
+
+---
+
+### ISSUE-001 | Drop counter double-counted in FrameProcessor
+
+**Priority:** Critical
+**Type:** Bug
+**File:** `app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt`
+**Fix before:** Day 3
+
+**Problem**
+
+`droppedByOverflow` is incremented in two places simultaneously for the same overflow event:
+
+1. In the `Channel` constructor via `onUndeliveredElement` callback
+2. In the `submitFrame()` else branch when `trySend` fails
+
+Both fire on the same failed send. Every dropped frame is counted twice, making the overlay and CSV metrics report double the actual drop rate.
+
+**Relevant code**
+
+```kotlin
+// Location 1 — Channel constructor (FrameProcessor.kt ~line 32)
+private val frameChannel = Channel<FramePacket>(
+    capacity = 1,
+    onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    onUndeliveredElement = { _ ->
+        droppedByOverflow.incrementAndGet() // counts here
+    }
+)
+
+// Location 2 — submitFrame() (FrameProcessor.kt ~line 56)
+val result = frameChannel.trySend(frame)
+if (result.isSuccess) {
+    queueDepth.set(1)
+} else {
+    droppedByOverflow.incrementAndGet() // also counts here — double count
+}
+```
+
+**Fix**
+
+Remove the `droppedByOverflow.incrementAndGet()` from the `submitFrame()` else branch. Keep only the `onUndeliveredElement` callback as the single source of truth for overflow drops.
+
+Note: `onUndeliveredElement` fires when `DROP_OLDEST` evicts an element that was already in the channel to make room. The `trySend` else branch fires when the send itself fails, which for a capacity-1 `DROP_OLDEST` channel should not happen in normal operation — the channel makes room before rejecting. Relying solely on `onUndeliveredElement` is correct.
+
+**Corrected submitFrame()**
+
+```kotlin
+fun submitFrame(frame: FramePacket) {
+    if (frameChannel.isClosedForSend) return
+    val result = frameChannel.trySend(frame)
+    if (result.isSuccess) {
+        queueDepth.set(1)
+    }
+    // Drop counting handled exclusively by onUndeliveredElement
+}
+```
+
+---
+
+### ISSUE-002 | CONTEXT.md references multi-module structure that does not exist
+
+**Priority:** Critical
+**Type:** Documentation / AI tooling
+**File:** `CONTEXT.md`
+**Fix before:** Day 3
+
+**Problem**
+
+`CONTEXT.md` is the anchor file pasted at the start of every Codex and Gemini session. It lists a multi-module Gradle structure:
+
+```
+:app
+:feature:capture
+:feature:analytics
+:feature:history
+:core:ml
+:core:ar
+:core:data
+:core:domain
+:core:ui
+```
+
+The actual repo is a single-module app (`:app` only). An AI coder following `CONTEXT.md` literally will attempt to create modules, wire Hilt across module boundaries, and scaffold files in paths that do not exist. This will produce code that does not compile and will require manual cleanup before it can be tested.
+
+**Fix**
+
+Add a clearly marked Phase 0 override block directly below the document header, before any AI coder reads the module structure section. Do not delete the multi-module structure — it is the target architecture. Override it for the spike only.
+
+**Insert after the "Active Phase" header in CONTEXT.md:**
+
+```markdown
+## ⚠️ Phase 0 Spike Override — Single Module
+
+The module structure listed below under "Module Structure" is the **target architecture
+for Phase 2+**. It does not exist yet.
+
+For all Phase 0 work:
+- The repo is a **single `:app` module** — no feature or core modules
+- Do NOT create new Gradle modules
+- Do NOT add Hilt — no DI framework in the spike
+- Do NOT add Room — no database in the spike
+- All code lives under `app/src/main/java/com/courtvision/spike/`
+- Existing packages: `camera/`, `pipeline/`
+
+When in doubt: keep it in `:app`. Module extraction happens at Phase 2 kickoff.
+```
+
+---
+
+### ISSUE-003 | Frame scheduling strategy undefined — 30fps + 150ms combined latency is incoherent
+
+**Priority:** Critical
+**Type:** Architecture / Documentation
+**Files:** `docs/tdd.md`, `docs/phase0-spike-plan.md`, `CONTEXT.md`
+**Fix before:** Day 5 (before combined pipeline test on Day 6)
+
+**Problem**
+
+The PRD and TDD simultaneously target:
+- 30fps analysis (33ms per frame budget)
+- Ball detection < 100ms per frame
+- Pose inference < 50ms per frame
+
+If both models run synchronously on every frame, the minimum combined cost is 150ms — a hard ceiling of ~6fps, not 30fps. The Phase 0 spike plan acknowledges async scheduling is needed but provides no design. Day 6 (combined pipeline) has no specification to validate against, meaning there is no way to declare Day 6 a pass or fail.
+
+**Fix**
+
+Write a one-page frame scheduling spec before Day 5 begins. Add it as `docs/plans/frame-scheduling-spec.md` and reference it from the Day 6 plan. The spec must answer:
+
+1. Do YOLO and MediaPipe share an analysis thread or run on separate executors?
+2. Does pose run every frame, every Nth frame, or on a timer-gated schedule?
+3. What is the frame-skip policy when inference is still in progress when the next frame arrives?
+4. What defines "combined FPS" in the Day 8 gate — camera frames analysed per second, or inference completions per second?
+5. At what point is the pipeline considered thermally throttled for gate purposes?
+
+**Suggested starting point for the spec:**
+
+```markdown
+## Frame Scheduling Strategy (Draft — Phase 0)
+
+Pipeline runs two parallel coroutine workers on Dispatchers.Default:
+- Worker A: YOLO detector — every frame submitted via bounded channel (capacity=1, DROP_OLDEST)
+- Worker B: MediaPipe pose — every 3rd frame (10fps target), gated by a frame counter
+
+Frame budget:
+- Camera feed: 30fps (33ms cadence)
+- YOLO worker: 30fps target, 100ms budget, backpressure via DROP_OLDEST
+- Pose worker: 10fps target, 50ms budget, sampled every 3rd frame
+
+Gate definition:
+- "Combined FPS" = YOLO inference completions per second (primary metric)
+- Pose FPS reported separately
+- Thermal throttle = sustained FPS drop >20% below baseline for >30s
+```
+
+Adjust the N-frame pose skip value based on Day 5 benchmark results before running Day 6.
+
+---
+
+### ISSUE-004 | MVP definition contradicts itself across PRD sections and user stories
+
+**Priority:** High
+**Type:** Documentation
+**Files:** `docs/prd.md` (sections 3.1 and 3.2), `docs/user-stories.md` (delivery plan table)
+**Fix before:** Day 5
+
+**Problem**
+
+Three documents define MVP scope differently and they do not agree:
+
+| Feature | PRD 3.1 (feature table) | PRD 3.2 (MVP table) | User stories delivery plan |
+|---|---|---|---|
+| Shot type classification | MVP: Yes | Must Ship | Sprint 6 — implies late/deferred |
+| Freemium paywall (US-24) | MVP: Yes | Deferred | P1, Sprint 6 |
+| Cumulative heatmap (US-12) | — | Deferred | P2, no sprint |
+| Vertical jump height | P0, MVP: Yes | Must Ship | — |
+| Guided drills | P2, MVP: No | Deferred | P2, no sprint |
+
+An AI coder reading PRD 3.1 and an AI coder reading PRD 3.2 will build different products.
+
+**Fix**
+
+1. Designate `docs/prd.md` Section 3.2 (the Must Ship / Deferred table) as the **single canonical MVP definition**.
+2. Update PRD 3.1 to remove the `MVP?` column and replace it with a note: *"See Section 3.2 for MVP scope."*
+3. Update `docs/user-stories.md` — add a `MVP?` column to the delivery plan table that references the 3.2 definition. Any story marked Deferred in 3.2 must be marked MVP: No in the delivery plan.
+4. Add a one-line note at the top of `CONTEXT.md` under the project summary: *"MVP scope: see docs/prd.md Section 3.2 — this is the canonical definition."*
+
+---
+
+### ISSUE-005 | TDD contains pre-ADR-001 language and unresolved open questions
+
+**Priority:** High
+**Type:** Documentation
+**File:** `docs/tdd.md`
+**Fix before:** Day 5
+
+**Problem**
+
+ADR-001 was accepted on 2026-03-25 and locked the single multi-class YOLO decision. The TDD has not been updated to reflect this. Specific stale content:
+
+- Section 3 tech stack table correctly lists YOLOv8n, but the surrounding prose in section 4 still implies the hoop detection strategy was under debate
+- Section 10 (Open Technical Questions) still lists hoop detection as a question with an inline "Resolved:" note rather than a proper reference to ADR-001. Inline "Resolved:" comments in a planning table read as unresolved to an AI agent scanning the doc
+- The phrase "optional manual rim-box fallback" appears in section 4.3 without clarifying it is a low-confidence edge case, not a primary path — this could cause an AI coder to implement it as a first-class feature
+
+**Fix**
+
+1. In Section 10, replace the hoop detection row with: *"Resolved — see ADR-001: Single Multi-Class YOLO Model (`docs/decisions/001-single-yolo-model.md`)"* and remove the inline resolution note.
+2. In Section 4.3, add one sentence clarifying the manual fallback scope: *"Manual rim-box override is a low-confidence fallback only — it is not a primary path and is out of scope for Phase 0."*
+3. Do a full-text search for "SSD MobileNet" and "manual hoop anchor" — remove or update any remaining references.
+
+---
+
+### ISSUE-006 | Acceptance criteria missing for US-13 through US-18
+
+**Priority:** High
+**Type:** Documentation
+**File:** `docs/user-stories.md`
+**Fix before:** Day 5
+
+**Problem**
+
+Six P1 user stories have story text and priority but no acceptance criteria. These stories cover core biomechanical metrics that feed directly into the ML pipeline design. Without AC, there is no testable definition of done and no way to validate the Day 8 gate for these features.
+
+Stories affected:
+- **US-13** — Release Speed
+- **US-14** — Release Angle
+- **US-15** — Knee Flexion Feedback
+- **US-16** — Metrics in Both Modes
+- **US-17** — Vertical Jump Height (P2, MVP: No — lower priority but still needs AC before Phase 2)
+- **US-18** — Auto Session Save
+
+**Fix**
+
+Add acceptance criteria for each story. Draft AC below — review and adjust before using as sprint input:
+
+**US-13 | Release Speed**
+- [ ] Release speed computed per shot and visible in post-session review
+- [ ] Displayed in mph and km/h (user-selectable or locale-based)
+- [ ] Accuracy target: within ±2 mph of manual reference measurement on test clips
+- [ ] Speed computed using ball centroid displacement + ARCore scale (tripod mode) or player height reference (ground mode)
+
+**US-14 | Release Angle**
+- [ ] Release angle computed from elbow-wrist landmark vector at detected release frame
+- [ ] Displayed in degrees, rounded to one decimal place
+- [ ] Feedback label shown: "Too flat" (<40°), "Optimal" (40°–55°), "Too steep" (>55°)
+- [ ] Available in both capture modes
+- [ ] Uses `pose_world_landmarks` (3D world space), not image-space coordinates
+
+**US-15 | Knee Flexion Feedback**
+- [ ] Knee angle measured at prep phase (0.2–0.5s before release, foot velocity ~0)
+- [ ] Hip-knee-ankle angle computed and averaged across left and right
+- [ ] Feedback label shown: "Deep bend" (<90°), "Optimal" (90°–120°), "Minimal bend" (>120°)
+- [ ] Visible in post-session shot review per shot
+
+**US-16 | Metrics in Both Modes**
+- [ ] Release angle, knee flexion, and release speed all available in ground mode and tripod mode
+- [ ] Ground mode shows estimation disclaimer for jump height only
+- [ ] No metric is hidden or disabled based on capture mode alone
+
+**US-18 | Auto Session Save**
+- [ ] Session saved automatically on session end without user action
+- [ ] Session record includes: date, duration, capture mode, total shots, makes, shooting %, avg release angle, avg knee angle
+- [ ] Session visible in history list immediately after save
+- [ ] Save succeeds even if app is backgrounded mid-session
+
+---
+
+### ISSUE-007 | Shot detection FSM missing measurable trigger thresholds
+
+**Priority:** Medium
+**Type:** Documentation / Architecture
+**File:** `docs/tdd.md` (Section 4.4)
+**Fix before:** Phase 2 kickoff
+
+**Problem**
+
+The FSM in TDD Section 4.4 defines states and transitions in prose but does not define the measurable trigger conditions needed to implement or test them. Without thresholds, two different AI coders will produce two different implementations and there is no spec to arbitrate between them.
+
+Missing definitions:
+- What pixel separation between ball bbox and wrist landmark counts as "ball leaves hand"?
+- What confidence threshold gates a make classification?
+- What temporal window is used for hoop intersection?
+- What constitutes "ball ascending arc" — minimum frame count? Minimum Y displacement?
+- What is the miss detection timeout — how long after FLIGHT before a non-intersection is declared a miss?
+
+**Fix**
+
+Expand TDD Section 4.4 with a threshold table. Add the following sub-section after the FSM state diagram:
+
+```markdown
+### 4.4.1 FSM Transition Thresholds (Phase 0 Starting Values — tune from benchmark data)
+
+| Transition | Trigger condition | Starting threshold |
+|---|---|---|
+| IDLE → PREP | Knee angle delta | >15° flexion increase over 500ms window |
+| PREP → RELEASE | Ball-wrist separation | Ball bbox centroid >40px from nearest wrist landmark (at 720p) |
+| PREP → RELEASE | Wrist position | Shooting wrist Y-coordinate above shoulder Y-coordinate |
+| RELEASE → FLIGHT | Ball trajectory direction | Ball centroid moving upward (negative Y delta) for ≥3 consecutive frames |
+| FLIGHT → OUTCOME (make) | Hoop intersection | Ball bbox overlaps hoop bbox region for ≥2 frames within 2s of release, hoop confidence >0.6 |
+| FLIGHT → OUTCOME (miss) | Timeout / floor | No intersection within 3s of release, OR ball detected at floor level (Y > 90% of frame height) |
+| OUTCOME → IDLE | Cooldown | 1.5s after OUTCOME state entered |
+
+All pixel thresholds assume 1280×720 analysis resolution. Scale proportionally if resolution changes.
+```
+
+---
+
+### ISSUE-008 | Architecture pipeline diagram missing
+
+**Priority:** Medium
+**Type:** Documentation
+**File:** `docs/tdd.md` or `docs/project-overview.md`
+**Fix before:** Phase 2 kickoff
+
+**Problem**
+
+The TDD describes the pipeline architecture in text across multiple sections (2.1, 4.1–4.5) but there is no single visual diagram. A coder agent reading CONTEXT.md cannot quickly orient to how the layers connect. This becomes more important as the pipeline grows from Day 3 (YOLO) through Day 6 (combined).
+
+**Fix**
+
+Add a pipeline diagram to `docs/tdd.md` Section 2.1 showing the full data flow from camera to UI. The diagram should cover the Phase 0 spike pipeline and the target Phase 2+ pipeline side by side or as a before/after. Minimum content:
+
+```
+Phase 0 (spike):
+CameraX (YUV 720p, 30fps)
+  → ImageAnalysis.Analyzer
+  → FrameProcessor (Channel, capacity=1, DROP_OLDEST)
+  → YOLO TFLite FP16 (GPU delegate) [Day 3+]
+  → Kalman tracker [Day 4+]
+  → MediaPipe Pose [Day 5+]
+  → Shot FSM [Day 7+]
+  → PipelineStats (StateFlow)
+  → CameraViewModel
+  → CameraScreen (Compose overlay)
+  → PerformanceCsvLogger
+```
+
+This can be added as a Mermaid flowchart in the markdown for easy diffing, or as an image generated separately.
+
+---
+
+### ISSUE-009 | ARCore fallback has no acceptance criteria
+
+**Priority:** Medium
+**Type:** Documentation
+**File:** `docs/user-stories.md` (US-09), `docs/tdd.md` (Section 10)
+**Fix before:** Phase 3 kickoff
+
+**Problem**
+
+US-09 (ARCore Floor Detection) only covers the happy path — ARCore initializes, plane detected, calibration proceeds. The TDD open questions table acknowledges a fallback exists ("use user height, court dimensions and orientation, and rim height as cues") but there are no acceptance criteria for:
+- What features are disabled or hidden on non-ARCore devices
+- What the user sees when ARCore is unavailable
+- What the minimum viable experience is in tripod mode without ARCore
+
+ARCore device coverage is not universal. If a meaningful percentage of target users are on non-ARCore devices and the fallback experience is undefined, this will generate support issues and negative reviews at launch.
+
+**Fix**
+
+Add a companion story US-09b to `docs/user-stories.md`:
+
+```markdown
+### US-09b | Non-ARCore Fallback Experience
+
+> As a user whose device does not support ARCore, I want the app to gracefully
+> disable spatial features and inform me clearly, so I can still use shot
+> tracking and biomechanical metrics without a confusing error state.
+
+**Priority:** P1
+**Story Points:** 3
+**MVP:** Yes
+
+**Acceptance Criteria**
+- [ ] App detects ARCore availability at launch via `ArCoreApk.checkAvailability()`
+- [ ] If ARCore unavailable: heatmap, court mapping, and zone classification features
+      are hidden from the UI (not shown as disabled/greyed — fully hidden)
+- [ ] User sees a one-time informational banner: "Court heatmap requires ARCore.
+      Shot tracking and form analysis are fully available."
+- [ ] All biomechanical metrics, shot detection, and session history remain fully functional
+- [ ] Non-ARCore state persisted in preferences — banner not shown on every launch
+```
+
+Also update TDD Section 10 to reference US-09b rather than the inline note.
+
+---
+
+### ISSUE-010 | No privacy and data retention spec
+
+**Priority:** Low (required before Play Store submission)
+**Type:** Documentation / Compliance
+**File:** New file — `docs/privacy-spec.md`
+**Fix before:** Play Store internal testing track submission
+
+**Problem**
+
+The issues log flagged this on Day 1. It remains unaddressed. Google Play requires a privacy policy for apps that access camera or microphone. The app currently:
+- Accesses the camera continuously during sessions
+- Writes video frame metadata to CSV on external storage
+- Will store video clips in a future phase
+
+There is no document defining what data is collected, where it lives, default retention policy, or deletion flow.
+
+**Fix**
+
+Create `docs/privacy-spec.md` with at minimum the following sections. This is not a legal privacy policy — it is an internal spec that will inform the public policy:
+
+```markdown
+# Privacy & Data Retention Spec
+
+## Data collected
+- Camera frames: processed in-memory only, never written to disk in Phase 0
+- Performance metrics: written to CSV at external storage path (benchmarks only, no PII)
+- Future phases: shot clips (+/- 3s per shot), session metadata, pose landmark sequences
+
+## Data storage
+- All data stored on-device only (no cloud in MVP)
+- CSV benchmarks: `Android/data/com.courtvision.spike/files/benchmarks/`
+- Future session clips: `Android/data/com.courtvision/files/sessions/{sessionId}/`
+
+## Retention policy
+- Benchmark CSVs: user-deletable, no auto-delete
+- Session clips (future): auto-delete after 30 days (configurable: 7 / 14 / 30 / never)
+- Session metadata (Room): retained until user deletes session
+
+## Data leaving the device
+- Phase 0–3: none
+- Phase 4+ (optional cloud sync tier): session metadata and aggregated stats only,
+  no raw video — user opt-in required
+
+## Deletion flow
+- User can delete individual sessions including all clips from session review screen
+- User can delete all data from settings screen
+- Uninstall removes all app-private storage automatically (Android platform guarantee)
+
+## Play Store requirements
+- Privacy policy URL required before production release
+- DATA_SAFETY form: camera usage declared, no data shared with third parties (Phase 0–3)
+```
+```
