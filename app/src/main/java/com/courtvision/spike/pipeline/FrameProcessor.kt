@@ -67,8 +67,6 @@ class FrameProcessor(
         val result = frameChannel.trySend(frame)
         if (result.isSuccess) {
             queueDepth.set(1)
-        } else {
-            droppedByOverflow.incrementAndGet()
         }
     }
 
