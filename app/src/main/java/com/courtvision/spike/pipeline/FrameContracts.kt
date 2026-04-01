@@ -13,7 +13,11 @@ data class PipelineStats(
     val avgAnalyzeMs: Double = 0.0,
     val p95AnalyzeMs: Double = 0.0,
     val droppedFrames: Long = 0,
-    val queueDepth: Int = 0
+    val queueDepth: Int = 0,
+    val lastInferenceMs: Double = 0.0,
+    val delegateMode: InferenceMode = InferenceMode.CPU,
+    val ramMb: Double = 0.0,
+    val thermalStatus: String = "UNKNOWN"
 )
 
 interface FrameConsumer {
@@ -32,3 +36,71 @@ data class GpuProbeResult(
     val deviceModel: String = "",
     val apiLevel: Int = 0
 )
+
+enum class InferenceMode {
+    CPU,
+    GPU
+}
+
+data class DetectionBox(
+    val classId: Int,
+    val label: String,
+    val confidence: Float,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+)
+
+data class DetectionFrame(
+    val timestampNs: Long = 0L,
+    val sourceWidth: Int = 0,
+    val sourceHeight: Int = 0,
+    val rotationDegrees: Int = 0,
+    val boxes: List<DetectionBox> = emptyList()
+)
+
+fun rotateDetectionBox(
+    box: DetectionBox,
+    rotationDegrees: Int
+): DetectionBox {
+    val normalizedRotation = ((rotationDegrees % 360) + 360) % 360
+
+    var displayLeft = box.left
+    var displayTop = box.top
+    var displayRight = box.right
+    var displayBottom = box.bottom
+
+    when (normalizedRotation) {
+        90 -> {
+            displayLeft = 1f - box.bottom
+            displayTop = box.left
+            displayRight = 1f - box.top
+            displayBottom = box.right
+        }
+        180 -> {
+            displayLeft = 1f - box.right
+            displayTop = 1f - box.bottom
+            displayRight = 1f - box.left
+            displayBottom = 1f - box.top
+        }
+        270 -> {
+            displayLeft = box.top
+            displayTop = 1f - box.right
+            displayRight = box.bottom
+            displayBottom = 1f - box.left
+        }
+    }
+
+    val clampedLeft = displayLeft.coerceIn(0f, 1f)
+    val clampedTop = displayTop.coerceIn(0f, 1f)
+    val clampedRight = displayRight.coerceIn(0f, 1f)
+    val clampedBottom = displayBottom.coerceIn(0f, 1f)
+
+    return box.copy(
+        left = minOf(clampedLeft, clampedRight),
+        top = minOf(clampedTop, clampedBottom),
+        right = maxOf(clampedLeft, clampedRight),
+        bottom = maxOf(clampedTop, clampedBottom)
+    )
+}

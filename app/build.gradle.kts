@@ -52,6 +52,10 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    androidResources {
+        noCompress += "tflite"
+    }
 }
 
 dependencies {
@@ -78,6 +82,7 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     implementation("com.google.android.material:material:1.12.0")
 
@@ -89,4 +94,27 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+tasks.register("checkAll") {
+    description = "Runs lint, unit tests, and instrumented tests (if device connected)"
+    group = "verification"
+    dependsOn("lintDebug", "testDebugUnitTest", "connectedDebugAndroidTest")
+}
+
+afterEvaluate {
+    tasks.named("connectedDebugAndroidTest") {
+        val adb = android.buildToolsVersion // force evaluation
+        onlyIf {
+            val result = providers.exec {
+                commandLine(android.adbExecutable.absolutePath, "devices")
+                isIgnoreExitValue = true
+            }.standardOutput.asText.get()
+            val hasDevice = result.lines().drop(1).any { it.contains("device") }
+            if (!hasDevice) {
+                logger.warn("WARNING: No device/emulator connected — skipping instrumented tests.")
+            }
+            hasDevice
+        }
+    }
 }

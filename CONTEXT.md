@@ -40,10 +40,12 @@ BEFORE any product architecture is locked in.
 
 Pipeline under test:
 ```
-CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → metrics logger
+CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics logger
 ```
 
 > Full spike plan: [docs/phase0-spike-plan.md](docs/phase0-spike-plan.md)
+
+**Progress:** Days 1–3 complete. Weekend training track complete (YOLOv8n trained at 640/480/320). Currently preparing for Day 4 (Kalman tracker).
 
 ### Day 8 Gate Criteria (all must pass)
 - [ ] Ball detection latency < 100ms (p95 < 140ms)
@@ -82,8 +84,8 @@ analytics pipeline · session history storage
 | Architecture      | MVVM + Clean Architecture          | Android Architecture Components               |
 | DI Framework      | Hilt (Dagger)                      | 2.x                                           |
 | Camera            | CameraX                            | Jetpack — API 21+                             |
-| Pose Estimation   | MediaPipe Pose Landmarker          | 0.10.x — 33 landmarks, 30fps                  |
-| Object Detection  | TFLite YOLOv8n FP16                | Single multi-class model: basketball + hoop   |
+| Pose Estimation   | MediaPipe Pose Landmarker (alt: YOLO26n-pose) | 0.10.x — 33 landmarks, 30fps           |
+| Object Detection  | TFLite YOLOv8n FP16 (alt: YOLO26n) | 5-class model: `ball`, `made`, `person`, `rim`, `shoot` |
 | AR / Spatial      | ARCore                             | Ground plane + anchors (Phase 3)              |
 | Computer Vision   | OpenCV Android                     | 4.x — corner/line detection, homography       |
 | Local Database    | Room                               | Session, shot, metric entities                |
@@ -134,11 +136,14 @@ ML / CV Layer     → CameraX feed, MediaPipe, TFLite detector, ARCore
 > Full details: [docs/tdd.md](docs/tdd.md) §4
 
 ### Single Multi-Class YOLO Detector (Canonical Decision)
-- Model: YOLOv8n exported to TFLite FP16
-- Classes: `basketball`, `hoop` — one inference pass, not two models
-- Input: 640×640 (fallback to 416 or 320 if thermal or FPS targets missed)
+- Model: YOLOv8n exported to TFLite FP16 (alt: YOLO26n)
+- Classes (nc=5): `ball`, `made`, `person`, `rim`, `shoot` — one inference pass
+- Input: 640×640 (fallback to 480 or 320 if thermal or FPS targets missed)
+- Preprocessing: TFLite Support Library `ImageProcessor` (`ResizeOp` BILINEAR + `NormalizeOp`) — ~19ms p50, resolution-independent
 - Runtime: GPU delegate primary, CPU fallback required
-- Post-process: Kalman tracking on ball centroid + temporal smoothing for hoop ROI
+- Supports both standard YOLO (external NMS) and end-to-end YOLO (NMS built-in)
+- Post-process: Kalman tracking on ball centroid + temporal smoothing for rim ROI
+- Note: `made` class provides a direct detector signal for shot outcome — may simplify FSM FLIGHT→OUTCOME transition
 
 ### Shot Detection State Machine (FSM)
 ```

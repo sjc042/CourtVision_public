@@ -12,11 +12,12 @@ Validate that real-time shot detection is achievable on Android using on-device 
 
 ## 🧠 Key Architectural Decision (Resolved)
 
-**Single multi-class YOLO detector for ball + hoop** (YOLOv8n, 2 classes).
+**Single multi-class YOLO detector** (YOLOv8n, 5 classes: `ball`, `made`, `person`, `rim`, `shoot`; alt: YOLO26n).
 
 - One inference pass instead of two models
-- Hoop provides a static spatial anchor for shot geometry without extra overhead
-- TFLite FP16, GPU delegate
+- `rim` provides a static spatial anchor for shot geometry without extra overhead
+- `made` class provides a direct detector signal for shot outcome
+- TFLite FP16, GPU delegate; supports both standard and end-to-end YOLO models
 - Simpler debugging and performance profiling
 
 > See [ADR-001: Single Multi-Class YOLO Model](decisions/001-single-yolo-model.md)
@@ -24,7 +25,7 @@ Validate that real-time shot detection is achievable on Android using on-device 
 Core spike pipeline:
 
 ```
-CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → metrics logger
+CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics logger
 ```
 
 ---
@@ -33,7 +34,8 @@ CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → met
 
 | Tier | Device |
 | --- | --- |
-| **Mid-range (primary target)** | Pixel 6 or Samsung Galaxy A54 |
+| **Primary testing device** | Samsung Galaxy S22+ |
+| **Mid-range (cross-check)** | Pixel 6 or Samsung Galaxy A54 |
 | **Low-end (stretch validation)** | Samsung Galaxy A32 |
 | **High-end (ceiling check)** | Samsung Galaxy S23 |
 
@@ -41,7 +43,7 @@ CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → met
 
 ## 📅 8-Day Spike Plan
 
-### Day 1–2 — CameraX Pipeline
+### Day 1–2 — CameraX Pipeline ✅
 
 - Barebones Android project: Kotlin + CameraX
 - Camera → frame buffer → inference loop scaffolding
@@ -49,15 +51,23 @@ CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → met
 - GPU delegate enabled, 720p input, 30fps target
 - **Output:** Stable camera pipeline at 30fps on target device
 
-> See [Day 1-2 Detailed Plan](plans/day1-2-plan.md)
+> See [Day 1-2 Detailed Plan](plans/day1-2-plan.md) — **COMPLETED 2026-03-26**
 
-### Day 3 — Single Detector: Ball + Hoop
+### Day 3 — Single Detector ✅
 
-- Export YOLOv8n (2 classes: basketball, hoop) to TFLite FP16
-- Plug into CameraX inference loop with GPU delegate
+- Export YOLOv8n to TFLite FP16 (COCO-pretrained for latency proxy)
+- Plug into CameraX inference loop with GPU delegate, UI toggle for CPU vs GPU
+- Added model selector UI, live bounding box overlay, end-to-end YOLO support, Bitmap preprocessing
 - Measure: per-frame latency, FPS, RAM, thermal behavior over 10-min session
 - **PRD target:** Ball detection < 100ms
-- **Output:** Latency log on Pixel 6
+- **Output:** Latency benchmarks committed to `/benchmarks/phase0/`
+
+> See [Day 3 & Weekend Plan](plans/day3+weekend-plan.md) — **Day 3 COMPLETED 2026-03-28**
+
+**Weekend training track (parallel, 2026-03-29 – 2026-03-30):**
+- Dataset: 15,856 images, 5 classes (`ball`, `made`, `person`, `rim`, `shoot`), dedup completed
+- YOLOv8n trained at 640/480/320: mAP50 = 0.940 / 0.935 / 0.895
+- Remaining: yolov8s, yolov11n, yolov11s training matrix
 
 ### Day 4 — Ball Tracker (Kalman Filter)
 
@@ -66,16 +76,17 @@ CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → met
 - Measure tracking stability and false positive rate
 - **Output:** Smooth ball trajectory over a 10-shot sequence
 
-### Day 5 — MediaPipe Pose (Isolated)
+### Day 5 — Pose Estimation Isolated (MediaPipe Pose / YOLO26n-pose)
 
-- Add MediaPipe Pose in a separate branch — not combined yet
+- Add MediaPipe Pose (or YOLO26n-pose as alternative) in a separate branch — not combined yet
 - Same benchmarks: FPS, per-frame latency, RAM
 - **PRD target:** Pose inference < 50ms
 - **Output:** Pose latency log on same device
+- **Scheduling spec:** [Frame Scheduling Spec](plans/frame-scheduling-spec.md) — must be complete before Day 5
 
 ### Day 6 — Combined Pipeline
 
-- Run YOLO detector + Kalman tracker + MediaPipe Pose simultaneously
+- Run YOLO detector + Kalman tracker + Pose estimator (MediaPipe Pose or YOLO26n-pose) simultaneously
 - Measure: GPU/CPU contention, thermal throttling, RAM over 10-min session
 - **PRD targets:** RAM < 400MB, no sustained thermal throttle
 - **Output:** Combined performance report
@@ -160,8 +171,8 @@ CameraX → YOLO (ball + hoop) → Kalman tracker → shot state machine → met
 
 ## 🏗️ Parallel: Repo Setup (Days 1–3)
 
-- [ ] Create GitHub repo
-- [ ] Kotlin + Jetpack Compose + MVVM scaffold
+- [x] Create GitHub repo
+- [x] Kotlin + Jetpack Compose + MVVM scaffold
 - [ ] GitHub Actions CI (build + lint)
 - [ ] ktlint / detekt code style
 - [ ] Branch protection rules

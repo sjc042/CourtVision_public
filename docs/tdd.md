@@ -11,7 +11,7 @@ Version 1.0 | Planning Stage | March 2026
 | Field | Detail |
 | --- | --- |
 | **Project** | CourtVision — Android Basketball AI Tracker |
-| **Primary Stack** | Kotlin, CameraX, MediaPipe, TensorFlow Lite, ARCore |
+| **Primary Stack** | Kotlin, CameraX, MediaPipe / YOLO26n-pose, TensorFlow Lite (YOLOv8n / YOLO26n), ARCore |
 | **Architecture Pattern** | MVVM + Clean Architecture (Repository Pattern) |
 | **Target Latency** | <50ms pose inference, <100ms object detection per frame |
 
@@ -26,7 +26,7 @@ CourtVision follows a Clean Architecture / MVVM pattern with these layers:
 - **Presentation Layer** — Jetpack Compose UI, ViewModels, UI state management.
 - **Domain Layer** — Use cases, business logic, shot detection algorithms, metric computation.
 - **Data Layer** — Room DB (local sessions), file storage (clips), optional cloud sync repository.
-- **ML / CV Layer** — CameraX feed, MediaPipe Pose, single multi-class TFLite detector (basketball + hoop), ARCore spatial anchors.
+- **ML / CV Layer** — CameraX feed, MediaPipe Pose (alt: YOLO26n-pose), single multi-class TFLite detector (5 classes: `ball`, `made`, `person`, `rim`, `shoot`; alt: YOLO26n), ARCore spatial anchors.
 
 ### 2.2 Module Structure
 
@@ -35,7 +35,7 @@ CourtVision follows a Clean Architecture / MVVM pattern with these layers:
 :feature:capture      — Camera session, mode switching, live overlay
 :feature:analytics    — Heatmap, session review, shot timeline
 :feature:history      — Session list, drill history, progress charts
-:core:ml              — MediaPipe wrapper, TFLite YOLOv8n multi-class detector (basketball + hoop)
+:core:ml              — MediaPipe / YOLO26n-pose wrapper, TFLite YOLOv8n / YOLO26n multi-class detector (ball, made, person, rim, shoot)
 :core:ar              — ARCore ground plane, homography, court mapper
 :core:data            — Room entities, DAOs, Repository interfaces
 :core:domain          — Use cases, models, ShotMetrics data classes
@@ -53,8 +53,8 @@ CourtVision follows a Clean Architecture / MVVM pattern with these layers:
 | Architecture | MVVM + Clean Architecture | Android Architecture Components |
 | DI Framework | Hilt (Dagger) | 2.x |
 | Camera | CameraX | Jetpack — API 21+ |
-| Pose Estimation | MediaPipe Pose Landmarker | 0.10.x — 33 landmarks, 30fps |
-| Object Detection | TensorFlow Lite (YOLOv8n FP16) | Single multi-class model: basketball + hoop |
+| Pose Estimation | MediaPipe Pose Landmarker (alt: YOLO26n-pose) | 0.10.x — 33 landmarks, 30fps |
+| Object Detection | TensorFlow Lite (YOLOv8n FP16) (alt: YOLO26n) | 5-class model: `ball`, `made`, `person`, `rim`, `shoot` |
 | AR / Spatial | ARCore | Google — ground plane + anchors |
 | Computer Vision | OpenCV Android | 4.x — corner/line detection, homography |
 | Local Database | Room | Jetpack — session, shot, metric entities |
@@ -74,9 +74,9 @@ CameraX ImageAnalysis use case provides YUV_420_888 frames at 30fps to a process
 - **Frame rate target:** 30fps analysis; display preview at 60fps uncoupled.
 - CameraX binds to lifecycle; session cleanup handled automatically.
 
-### 4.2 MediaPipe Pose Estimation
+### 4.2 Pose Estimation (MediaPipe Pose Landmarker / YOLO26n-pose)
 
-MediaPipe Pose Landmarker detects 33 body landmarks per frame. Key landmarks used:
+MediaPipe Pose Landmarker detects 33 body landmarks per frame. Alternative: YOLO26n-pose, which unifies object detection and pose estimation in a single inference pass. Key landmarks used:
 
 - **Landmarks 15/16 (wrists)** — release point and angle computation.
 - **Landmarks 13/14 (elbows)** — elbow flexion at release.
@@ -87,14 +87,16 @@ Landmark world coordinates (normalized to body scale) are used for angle calcula
 
 ### 4.3 Ball + Hoop Detection Model (Canonical)
 
-CourtVision uses a **single multi-class YOLOv8n detector** exported to TensorFlow Lite FP16:
+CourtVision uses a **single multi-class YOLOv8n detector** exported to TensorFlow Lite FP16 (alt: YOLO26n):
 
-- **Classes:** basketball, hoop
-- **Input:** 640x640 (fallback to 416/320 when thermal or FPS targets are missed)
-- **Output:** bounding boxes + confidence for both classes in one inference pass
+- **Classes (nc=5):** `ball`, `made`, `person`, `rim`, `shoot`
+- **Input:** 640x640 (fallback to 480/320 when thermal or FPS targets are missed)
+- **Output:** bounding boxes + confidence for all classes in one inference pass
 - **Runtime:** GPU delegate primary, CPU fallback path required
-- **Rationale:** one pass reduces integration complexity, keeps hoop as a spatial anchor, and simplifies profiling
-- **Post-process:** Kalman tracking on ball centroid + temporal smoothing for hoop ROI stability
+- **Model variants:** supports both standard YOLO (external NMS) and end-to-end YOLO (NMS built-in)
+- **Rationale:** one pass reduces integration complexity, keeps `rim` as a spatial anchor, and simplifies profiling
+- **Post-process:** Kalman tracking on ball centroid + temporal smoothing for rim ROI stability
+- **Note:** `made` class provides a direct detector signal for shot outcome — may simplify or supplement hoop-intersection logic in the FSM FLIGHT→OUTCOME transition
 
 > See [ADR-001: Single Multi-Class YOLO Model](decisions/001-single-yolo-model.md) for the full decision record.
 
@@ -215,6 +217,8 @@ DrillResult: id, sessionId, drillType, targetZone, completionRate, avgReleaseSpe
 
 ## 8. Performance Targets
 
+> For Day 6 combined pipeline pass/fail criteria, see [Frame Scheduling Spec](plans/frame-scheduling-spec.md#day-6-passfail-criteria).
+
 | Metric | Target |
 | --- | --- |
 | Pose inference latency | < 50ms per frame (GPU delegate) |
@@ -257,7 +261,7 @@ DrillResult: id, sessionId, drillType, targetZone, completionRate, avgReleaseSpe
 
 | Question | Resolution |
 | --- | --- |
-| Hoop detection strategy: trained model vs. manual anchor? | **Resolved: single multi-class YOLO model detects hoop directly; optional manual rim-box fallback only when hoop confidence is persistently low** |
+| Hoop detection strategy: trained model vs. manual anchor? | **Resolved:** see [ADR-001](decisions/001-single-yolo-model.md) — single multi-class YOLO model detects hoop directly; optional manual rim-box fallback only when hoop confidence is persistently low |
 | OpenCV dependency size (~40MB AAR) acceptable? | **Acceptable for MVP, explore alternatives in later versions** |
 | ARCore availability fallback for tripod mode? | **Yes, use user height, court dimensions and orientation, and rim height as cues** |
 | Ball model training: Roboflow public dataset vs. own data? | **Use public Roboflow dataset first; fine-tune on own data later if needed** |

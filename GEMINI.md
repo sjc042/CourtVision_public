@@ -11,3 +11,6 @@ On every session start, read these files before doing anything else:
 ## Rules
 - Do not touch pipeline or ML layer files
 - Flag any suggested dependency additions
+
+## When performing code review
+- Review ./docs/dev-workflow.md first.

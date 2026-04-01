@@ -180,10 +180,10 @@ CourtVision is an Android-native basketball performance tracking app that uses o
 | Minimum Android Version | API 26 (Android 8.0 Oreo) |
 | ARCore Required | ARCore-supported devices only (for heatmap mode) |
 | Camera | Rear camera, minimum 1080p @ 30fps |
-| Processing | All CV/ML on-device via TFLite and MediaPipe |
+| Processing | All CV/ML on-device via TFLite and MediaPipe / YOLO26n-pose |
 | Internet | Required only for account sync and optional cloud backup |
 | Storage | Session video clips stored locally; auto-delete after 30 days (configurable) |
-| ML Framework | TensorFlow Lite (YOLOv8n multi-class: basketball + hoop), MediaPipe (pose) |
+| ML Framework | TensorFlow Lite (YOLOv8n / YOLO26n multi-class: basketball + hoop), MediaPipe Pose (alt: YOLO26n-pose) |
 | AR Framework | ARCore (Google) |
 | Target Latency | <50ms pose inference, <100ms ball detection per frame |
 

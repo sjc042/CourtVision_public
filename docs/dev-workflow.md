@@ -135,12 +135,40 @@ If the output fails your review → re-prompt the implementing AI with the speci
 
 ### 4. Validate Locally
 
+#### Quick check — feature-specific unit tests
+
+Run tests scoped to the package you changed:
+
+```
+./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.*"
+./gradlew testDebugUnitTest --tests "com.courtvision.spike.pipeline.*"
+```
+
+Or a single test class/method:
+
+```
+./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.CameraViewModelTest"
+./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.CameraViewModelTest.setModel_resetsInterpreterAndClearsStaleUiState"
+```
+
+#### Full local validation — before pushing
+
+Run the cross-platform `checkAll` task (lint + all unit tests):
+
+```
+./gradlew :app:checkAll
+```
+
+This is equivalent to running `lintDebug` and `testDebugUnitTest` together.
+
+#### Static analysis (when configured)
+
 ```
 ./gradlew ktlintCheck
 ./gradlew detekt
-./gradlew test
-./gradlew assembleDebug
 ```
+
+#### On-device benchmarks
 
 For any change touching the ML pipeline, run an **on-device benchmark** before pushing — not after CI. Commit results to `/benchmarks/phase0/` as required by the Phase 0 protocol.
 
@@ -160,6 +188,8 @@ PRD hard targets to validate on-device:
 
 **GitHub Actions workflow** (`.github/workflows/android.yml`):
 
+CI runs in staged jobs — fast checks gate slow ones so failures surface early and save CI minutes.
+
 ```yaml
 name: Android CI
 on:
@@ -167,8 +197,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+
 jobs:
-  build:
+  lint:
+    name: Lint & Static Analysis
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -176,21 +208,41 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-      - uses: actions/cache@v4
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew lintDebug
+
+  unit-test:
+    name: Unit Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('**/*.gradle*') }}
-      - run: ./gradlew ktlintCheck
-      - run: ./gradlew detekt
-      - run: ./gradlew test
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew testDebugUnitTest --fail-fast
+
+  build:
+    name: Assemble Debug APK
+    needs: unit-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: debug-apk
           path: app/build/outputs/apk/debug/*.apk
 ```
+
+The `gradle/actions/setup-gradle@v4` action handles Gradle caching automatically. The `needs:` chain ensures: lint → unit tests → build — if an earlier stage fails, later stages are skipped.
 
 **PR description template:**
 

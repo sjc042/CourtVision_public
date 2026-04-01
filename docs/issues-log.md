@@ -7,19 +7,22 @@ Issues are tracked on GitHub: [sjc042/Court-Vision Issues](https://github.com/sj
 
 ## GitHub Issues Index
 
-| GH# | Title | Priority | Milestone | Source |
-|-----|-------|----------|-----------|--------|
-| [#1](https://github.com/sjc042/Court-Vision/issues/1) | Fix double-counted drop counter in FrameProcessor | Critical | Day 3 | ISSUE-001 |
-| [#2](https://github.com/sjc042/Court-Vision/issues/2) | Add Phase 0 single-module override to CONTEXT.md | Critical | Day 3 | ISSUE-002 |
-| [#3](https://github.com/sjc042/Court-Vision/issues/3) | Define frame scheduling strategy for combined pipeline | Critical | Day 5 | ISSUE-003 + Day1 #4 |
-| [#4](https://github.com/sjc042/Court-Vision/issues/4) | Consolidate MVP scope to single canonical definition | High | Day 5 | ISSUE-004 + Day1 #2 |
-| [#5](https://github.com/sjc042/Court-Vision/issues/5) | Update TDD to reflect ADR-001 and remove stale references | High | Day 5 | ISSUE-005 + Day1 #1 |
-| [#6](https://github.com/sjc042/Court-Vision/issues/6) | Add acceptance criteria for US-13 through US-18 | High | Day 5 | ISSUE-006 + Day1 #6 |
-| [#7](https://github.com/sjc042/Court-Vision/issues/7) | Unify device test matrix across all docs | Medium | Day 5 | Day1 #5 |
-| [#8](https://github.com/sjc042/Court-Vision/issues/8) | Add FSM transition threshold table to TDD | Medium | Phase 2 | ISSUE-007 |
-| [#9](https://github.com/sjc042/Court-Vision/issues/9) | Add pipeline architecture diagram to TDD | Medium | Phase 2 | ISSUE-008 |
-| [#10](https://github.com/sjc042/Court-Vision/issues/10) | Define ARCore fallback UX and add US-09b | Medium | Phase 3 | ISSUE-009 + Day1 #7 |
-| [#11](https://github.com/sjc042/Court-Vision/issues/11) | Create privacy and data retention spec | Low | Pre-launch | ISSUE-010 + Day1 #8,#9 |
+| GH# | Title | Priority | Milestone | Source | Status |
+|-----|-------|----------|-----------|--------|--------|
+| [#1](https://github.com/sjc042/Court-Vision/issues/1) | Fix double-counted drop counter in FrameProcessor | Critical | Day 3 | ISSUE-001 | ✅ Fixed (`4ab53f0`) |
+| [#2](https://github.com/sjc042/Court-Vision/issues/2) | Add Phase 0 single-module override to CONTEXT.md | Critical | Day 3 | ISSUE-002 | ✅ Fixed (`de3490c`) |
+| [#3](https://github.com/sjc042/Court-Vision/issues/3) | Define frame scheduling strategy for combined pipeline | Critical | Day 5 | ISSUE-003 + Day1 #4 | ✅ Spec written (`de3490c`) |
+| [#4](https://github.com/sjc042/Court-Vision/issues/4) | Consolidate MVP scope to single canonical definition | High | Day 5 | ISSUE-004 + Day1 #2 | Open |
+| [#5](https://github.com/sjc042/Court-Vision/issues/5) | Update TDD to reflect ADR-001 and remove stale references | High | Day 5 | ISSUE-005 + Day1 #1 | Open |
+| [#6](https://github.com/sjc042/Court-Vision/issues/6) | Add acceptance criteria for US-13 through US-18 | High | Day 5 | ISSUE-006 + Day1 #6 | Open |
+| [#7](https://github.com/sjc042/Court-Vision/issues/7) | Unify device test matrix across all docs | Medium | Day 5 | Day1 #5 | Open |
+| [#8](https://github.com/sjc042/Court-Vision/issues/8) | Add FSM transition threshold table to TDD | Medium | Phase 2 | ISSUE-007 | Open |
+| [#9](https://github.com/sjc042/Court-Vision/issues/9) | Add pipeline architecture diagram to TDD | Medium | Phase 2 | ISSUE-008 | Open |
+| [#10](https://github.com/sjc042/Court-Vision/issues/10) | Define ARCore fallback UX and add US-09b | Medium | Phase 3 | ISSUE-009 + Day1 #7 | Open |
+| [#11](https://github.com/sjc042/Court-Vision/issues/11) | Create privacy and data retention spec | Low | Pre-launch | ISSUE-010 + Day1 #8,#9 | Open |
+| [#12](https://github.com/sjc042/Court-Vision/issues/12) | Incorrect bbox scale (FILL_CENTER letterboxing) | High | Day 4 | ISSUE-011 | ✅ Fixed |
+| [#13](https://github.com/sjc042/Court-Vision/issues/13) | Incorrect class ID on first session start | Critical | Day 4 | ISSUE-012 | ✅ Fixed |
+| — | Detection fails on 180° rotation (sensorLandscape) | High | Day 4 | ISSUE-013 | ✅ Fixed |
 
 ---
 
@@ -501,4 +504,91 @@ Create `docs/privacy-spec.md` with at minimum the following sections. This is no
 - Privacy policy URL required before production release
 - DATA_SAFETY form: camera usage declared, no data shared with third parties (Phase 0–3)
 ```
-```
+---
+
+### ISSUE-011 | Incorrect Bbox scale (FILL_CENTER letterboxing)
+
+**Priority:** High (for spike testing visualization)
+**Type:** Bug
+**File:** `app/src/main/java/com/courtvision/spike/camera/CameraScreen.kt`
+**Fix before:** Day 4 (Kalman tracker)
+
+**Problem**
+
+Bounding boxes render with correct width but squished height. `DetectionOverlay` maps normalized [0,1] model coordinates to canvas pixels via simple multiplication (`normalized * canvasSize`), but ignores that `PreviewView.ScaleType.FILL_CENTER` crops the camera feed to fill the screen. The camera feed (9:16 in portrait after rotation) has a different aspect ratio than the screen (e.g. 9:20), so the Y-axis scaling is wrong.
+
+**Root cause:** The normalized coords from the 640×640 model are correct (stretch cancels during normalization). The only issue is the canvas↔preview mapping — FILL_CENTER scales and center-crops, but the overlay assumed a 1:1 mapping from normalized space to screen space.
+
+**Fix**
+
+Replace simple `normalized * canvasSize` with FILL_CENTER-aware mapping in `DetectionOverlay`:
+1. Compute effective source dimensions (swap W/H for 90°/270° rotation)
+2. Compute `scale = max(canvasW/srcW, canvasH/srcH)`, then crop offsets
+3. Map: `screenX = normalized * scaledW - offsetX`
+
+**Status:** ✅ Fixed
+
+---
+### ISSUE-012 | Incorrect Class ID
+
+**Priority:** Critical
+**Type:** Bug
+**File:** `app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt`
+**Fix before:** Day 4 (Kalman tracker)
+
+**Problem**
+
+On first session start, person boxes display as "ball" and random boxes appear with labels like "class32" or "class66" (gray/white, unmapped color).
+
+**Root cause (dual):**
+1. **COCO class count mismatch** (primary): `parseModelOutput` computes `numClasses = output[0].size - 4` dynamically. For COCO YOLOv8n, output shape is `[1, 84, 8400]` → `numClasses = 80`. Best class picked from all 80, but `CUSTOM_CLASS_NAMES` has 5 entries. COCO person (class 0) → "ball"; COCO sports ball (class 32) → "class32".
+2. **Stale GPU buffers** (secondary): TFLite GPU delegate may leave uninitialized memory in output arrays on first frame. 
+    - **Update**: Current pre-allocated buffer and default model is yolov8n with COCO class, when I first open the app, change model to 5-class YOLOv8n model, and use GPU to inference, 
+       prediction boxes are not accurate and classes incorrect as if output by COCO YOLOv8n model; however, if loading via CPU for the first time, boxes are correct, 5 classes and accurate.
+
+
+**Fix:**
+1. **Implemented** Zero output buffers before each `interpreter.run()`
+2. **Implemented** Filter `classId >= CUSTOM_CLASS_NAMES.size` in both `parseModelOutput` and `parseEndToEndOutput`
+
+**Status:** ✅ Fixed
+
+---
+
+### ISSUE-013 | Detection fails on 180° phone rotation (sensorLandscape)
+
+**Priority:** High
+**Type:** Bug
+**Files:** `app/src/main/java/com/courtvision/spike/camera/CameraScreen.kt`, `app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt`
+**Fix before:** Day 4
+
+**Problem**
+
+When the phone is rotated 180° in `sensorLandscape` mode, YOLO detections fail (0 boxes returned) because the model receives an upside-down image. Returning to the original orientation restores correct detection.
+
+**Root cause**
+
+`ImageAnalysis.targetRotation` was never updated after initial camera bind. The activity is configured with `sensorLandscape` + `configChanges="orientation"`, so it does not recreate on 180° flips. CameraX defaults `targetRotation` to the display rotation at bind time and does not auto-track changes. As a result, `imageProxy.imageInfo.rotationDegrees` stays `0` even when the display rotates to `ROTATION_2` (180°), and no `Rot90Op` correction is applied before inference.
+
+**Diagnosis**
+
+Added `CV_Rotation` diagnostic logging at each pipeline step. Confirmed:
+- Default orientation: `raw=0 normalized=0` → detections correct
+- Rotated 180°: `raw=0 normalized=0` → model sees upside-down image, `boxCount=0`
+
+**Fix**
+
+Added `DisplayManager.DisplayListener` in `CameraPreview()` that updates `preview.targetRotation` and `analysis.targetRotation` whenever display rotation changes. Listener is unregistered in `DisposableEffect.onDispose` to avoid leaks.
+
+**Known limitation — CameraX buffer lag (~1-2s)**
+
+After a rotation change, there is a ~1-2 second delay before `rotationDegrees` updates in incoming frames. This is expected CameraX behavior:
+- `DisplayListener.onDisplayChanged` fires ~100-300ms after rotation settles
+- CameraX HAL capture pipeline buffers 3-8 frames with old `targetRotation` metadata
+- Frames already queued retain the stale rotation value until drained
+
+Net effect: a brief transition window where a few frames process with the old rotation. This does not affect steady-state correctness and is inherent to the CameraX architecture.
+
+**Status:** ✅ Fixed
+
+---

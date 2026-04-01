@@ -11,5 +11,11 @@ captures/
 # Claude Code local session data
 .claude/
 
-# Temporary Gradle user home (test execution artifact)
-.gradle-user-home/
+# Codex sandbox artifacts (should not exist locally)
+.gradle-user/
+
+# ML model weights and calibration data (too large for git)
+app/src/main/assets/*.pt
+app/src/main/assets/*.onnx
+app/src/main/assets/*.npy
+app/src/main/assets/*_saved_model/

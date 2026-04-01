@@ -2,7 +2,10 @@ package com.courtvision.spike.camera
 
 import android.Manifest
 import android.content.Context
+import android.hardware.display.DisplayManager
+import android.util.Log
 import android.content.pm.PackageManager
+import android.graphics.Paint
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -11,7 +14,12 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +31,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,14 +43,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.courtvision.spike.pipeline.DetectionFrame
+import com.courtvision.spike.pipeline.InferenceMode
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -80,9 +95,16 @@ fun CameraScreen(
             viewModel = viewModel,
             modifier = Modifier.fillMaxSize()
         )
+        DetectionOverlay(
+            detectionFrame = uiState.detectionFrame,
+            modifier = Modifier.fillMaxSize()
+        )
         MetricsOverlay(
             uiState = uiState,
-            onDelaySelect = viewModel::setSimulatedDelayMs
+            onModeSelect = viewModel::setInferenceMode,
+            onModelSelect = viewModel::setModel,
+            onConfirmModel = viewModel::confirmModel,
+            onRestartSession = viewModel::restartSession
         )
     }
 }
@@ -100,6 +122,10 @@ private fun CameraPreview(
         }
     }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val displayManager = remember {
+        context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    }
+    var displayListenerRef by remember { mutableStateOf<DisplayManager.DisplayListener?>(null) }
 
     LaunchedEffect(previewView, lifecycleOwner) {
         try {
@@ -124,6 +150,20 @@ private fun CameraPreview(
                 analysis
             )
 
+            // Keep ImageAnalysis.targetRotation in sync with display rotation
+            // so CameraX reports the correct rotationDegrees on each frame.
+            val listener = object : DisplayManager.DisplayListener {
+                override fun onDisplayChanged(displayId: Int) {
+                    val display = displayManager.getDisplay(displayId) ?: return
+                    preview.targetRotation = display.rotation
+                    analysis.targetRotation = display.rotation
+                }
+                override fun onDisplayAdded(displayId: Int) {}
+                override fun onDisplayRemoved(displayId: Int) {}
+            }
+            displayManager.registerDisplayListener(listener, null)
+            displayListenerRef = listener
+
             viewModel.onCameraStarted()
         } catch (error: Throwable) {
             viewModel.onCameraError("Camera bind failed: ${error.message ?: "unknown error"}")
@@ -132,6 +172,7 @@ private fun CameraPreview(
 
     DisposableEffect(Unit) {
         onDispose {
+            displayListenerRef?.let { displayManager.unregisterDisplayListener(it) }
             try {
                 ProcessCameraProvider.getInstance(context).get().unbindAll()
             } catch (_: Throwable) {
@@ -149,14 +190,104 @@ private fun CameraPreview(
 }
 
 @Composable
+private fun DetectionOverlay(
+    detectionFrame: DetectionFrame,
+    modifier: Modifier = Modifier
+) {
+    val textPaint = remember {
+        Paint().apply {
+            color = android.graphics.Color.WHITE
+            textSize = 36f
+            isAntiAlias = true
+            style = Paint.Style.FILL
+        }
+    }
+    var lastLoggedOverlayRotation by remember { mutableStateOf(-1) }
+
+    Canvas(modifier = modifier) {
+        val canvasW = size.width
+        val canvasH = size.height
+
+        // Effective source dimensions after rotation (sensor reports landscape W×H).
+        val rotation = detectionFrame.rotationDegrees
+        val effectiveSrcW: Float
+        val effectiveSrcH: Float
+        if (rotation == 90 || rotation == 270) {
+            effectiveSrcW = detectionFrame.sourceHeight.toFloat()
+            effectiveSrcH = detectionFrame.sourceWidth.toFloat()
+        } else {
+            effectiveSrcW = detectionFrame.sourceWidth.toFloat()
+            effectiveSrcH = detectionFrame.sourceHeight.toFloat()
+        }
+
+        // FILL_CENTER: scale image to fully cover the canvas, then center-crop overflow.
+        val scale = if (effectiveSrcW > 0f && effectiveSrcH > 0f) {
+            maxOf(canvasW / effectiveSrcW, canvasH / effectiveSrcH)
+        } else {
+            1f
+        }
+        val scaledW = effectiveSrcW * scale
+        val scaledH = effectiveSrcH * scale
+        val offsetX = (scaledW - canvasW) / 2f
+        val offsetY = (scaledH - canvasH) / 2f
+
+        if (rotation != lastLoggedOverlayRotation) {
+            Log.d("CV_Rotation", "OVERLAY rotation=$rotation effectiveSrcW=$effectiveSrcW effectiveSrcH=$effectiveSrcH canvasW=$canvasW canvasH=$canvasH")
+            Log.d("CV_Rotation", "OVERLAY scale=$scale offsetX=$offsetX offsetY=$offsetY")
+            lastLoggedOverlayRotation = rotation
+        }
+
+        detectionFrame.boxes.forEach { box ->
+            val displayBox = box
+            val left = displayBox.left * scaledW - offsetX
+            val top = displayBox.top * scaledH - offsetY
+            val right = displayBox.right * scaledW - offsetX
+            val bottom = displayBox.bottom * scaledH - offsetY
+
+            val boxColor = when (displayBox.classId) {
+                0 -> Color(0xFFFF6F00)  // ball → orange
+                1 -> Color(0xFF43A047)  // made → green
+                2 -> Color(0xFF1E88E5)  // person → blue
+                3 -> Color(0xFFFFD600)  // rim → yellow
+                4 -> Color(0xFFAB47BC)  // shoot → purple
+                else -> Color(0xFFFFFFFF)
+            }
+
+            drawRect(
+                color = boxColor,
+                topLeft = Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(
+                    width = (right - left).coerceAtLeast(0f),
+                    height = (bottom - top).coerceAtLeast(0f)
+                ),
+                style = Stroke(width = 3.dp.toPx())
+            )
+
+            drawContext.canvas.nativeCanvas.drawText(
+                "${displayBox.label} ${"%.2f".format(displayBox.confidence)}",
+                left.coerceAtLeast(8f),
+                (top - 12f).coerceAtLeast(36f),
+                textPaint
+            )
+        }
+    }
+}
+
+@Composable
 private fun MetricsOverlay(
     uiState: CameraUiState,
-    onDelaySelect: (Long) -> Unit
+    onModeSelect: (InferenceMode) -> Unit,
+    onModelSelect: (String) -> Unit,
+    onConfirmModel: () -> Unit,
+    onRestartSession: () -> Unit
 ) {
+    val modelSelectionLocked = uiState.modelConfirmed
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0x66000000))
+            .verticalScroll(rememberScrollState())
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -169,7 +300,9 @@ private fun MetricsOverlay(
         Text(
             "Device: ${uiState.gpuProbeResult.deviceModel} | API ${uiState.gpuProbeResult.apiLevel}",
             color = Color.White,
-            style = MaterialTheme.typography.bodySmall
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
         uiState.gpuProbeResult.reason?.let { reason ->
             Text(
@@ -184,6 +317,21 @@ private fun MetricsOverlay(
             style = MaterialTheme.typography.bodySmall
         )
         Text(
+            "Inference: ${"%.2f".format(uiState.stats.lastInferenceMs)}ms | Mode: ${uiState.stats.delegateMode}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "Model: ${shortModelName(uiState.selectedModel)}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "RAM: ${"%.1f".format(uiState.stats.ramMb)}MB | Thermal: ${uiState.stats.thermalStatus}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
             "Dropped: ${uiState.stats.droppedFrames} | Queue: ${uiState.stats.queueDepth}",
             color = Color.White,
             style = MaterialTheme.typography.bodySmall
@@ -191,32 +339,58 @@ private fun MetricsOverlay(
         Text(
             "CSV: ${uiState.logFilePath}",
             color = Color.White,
-            style = MaterialTheme.typography.bodySmall
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
+        if (uiState.isSwitchingMode) {
+            Text(
+                "Switching delegate mode...",
+                color = Color(0xFFFFD54F),
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
         uiState.lastError?.let {
             Text("Error: $it", color = Color(0xFFFFD54F), style = MaterialTheme.typography.bodySmall)
         }
-        DelaySelector(
-            selectedDelayMs = uiState.simulatedDelayMs,
-            onDelaySelect = onDelaySelect
+        InferenceModeSelector(
+            selectedMode = uiState.selectedMode,
+            onModeSelect = onModeSelect
+        )
+        ModelSelector(
+            availableModels = uiState.availableModels,
+            selectedModel = uiState.selectedModel,
+            modelConfirmed = uiState.modelConfirmed,
+            locked = modelSelectionLocked,
+            onModelSelect = onModelSelect,
+            onConfirmModel = onConfirmModel,
+            onRestartSession = onRestartSession
         )
     }
 }
 
 @Composable
-private fun DelaySelector(
-    selectedDelayMs: Long,
-    onDelaySelect: (Long) -> Unit
+private fun InferenceModeSelector(
+    selectedMode: InferenceMode,
+    onModeSelect: (InferenceMode) -> Unit
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        DelayButton(label = "0ms", selected = selectedDelayMs == 0L, onClick = { onDelaySelect(0) })
-        DelayButton(label = "10ms", selected = selectedDelayMs == 10L, onClick = { onDelaySelect(10) })
-        DelayButton(label = "20ms", selected = selectedDelayMs == 20L, onClick = { onDelaySelect(20) })
+        ModeButton(
+            label = "CPU",
+            selected = selectedMode == InferenceMode.CPU,
+            onClick = { onModeSelect(InferenceMode.CPU) }
+        )
+        ModeButton(
+            label = "GPU",
+            selected = selectedMode == InferenceMode.GPU,
+            onClick = { onModeSelect(InferenceMode.GPU) }
+        )
     }
 }
 
 @Composable
-private fun DelayButton(
+private fun ModeButton(
     label: String,
     selected: Boolean,
     onClick: () -> Unit
@@ -235,6 +409,66 @@ private fun DelayButton(
             Text(label)
         }
     }
+}
+
+@Composable
+private fun ModelSelector(
+    availableModels: List<String>,
+    selectedModel: String,
+    modelConfirmed: Boolean,
+    locked: Boolean,
+    onModelSelect: (String) -> Unit,
+    onConfirmModel: () -> Unit,
+    onRestartSession: () -> Unit
+) {
+    Text(
+        text = if (locked) {
+            "Model selector locked after confirmation"
+        } else {
+            "Select model before starting inference"
+        },
+        color = Color.White,
+        style = MaterialTheme.typography.bodySmall
+    )
+    Text(
+        text = "Models found: ${availableModels.size}",
+        color = Color.White,
+        style = MaterialTheme.typography.bodySmall
+    )
+
+    if (!modelConfirmed) {
+        Button(onClick = onConfirmModel) {
+            Text("Start Inference")
+        }
+    } else {
+        Button(onClick = onRestartSession) {
+            Text("Restart Session")
+        }
+    }
+
+    Row(
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        availableModels.forEach { modelPath ->
+            FilterChip(
+                selected = modelPath == selectedModel,
+                onClick = { onModelSelect(modelPath) },
+                enabled = !locked,
+                label = {
+                    Text(shortModelName(modelPath))
+                }
+            )
+        }
+    }
+}
+
+private fun shortModelName(modelPath: String): String {
+    if (modelPath.isBlank()) return "n/a"
+    val fileName = modelPath.substringAfterLast('/').removeSuffix(".tflite")
+    return fileName
+        .replace("_float16", "-fp16")
+        .replace("_float32", "-fp32")
 }
 
 @Composable
