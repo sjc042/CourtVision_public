@@ -3,7 +3,6 @@ package com.courtvision.spike.camera
 import android.Manifest
 import android.content.Context
 import android.hardware.display.DisplayManager
-import android.util.Log
 import android.content.pm.PackageManager
 import android.graphics.Paint
 import android.util.Size
@@ -202,7 +201,6 @@ private fun DetectionOverlay(
             style = Paint.Style.FILL
         }
     }
-    var lastLoggedOverlayRotation by remember { mutableStateOf(-1) }
 
     Canvas(modifier = modifier) {
         val canvasW = size.width
@@ -231,11 +229,6 @@ private fun DetectionOverlay(
         val offsetX = (scaledW - canvasW) / 2f
         val offsetY = (scaledH - canvasH) / 2f
 
-        if (rotation != lastLoggedOverlayRotation) {
-            Log.d("CV_Rotation", "OVERLAY rotation=$rotation effectiveSrcW=$effectiveSrcW effectiveSrcH=$effectiveSrcH canvasW=$canvasW canvasH=$canvasH")
-            Log.d("CV_Rotation", "OVERLAY scale=$scale offsetX=$offsetX offsetY=$offsetY")
-            lastLoggedOverlayRotation = rotation
-        }
 
         detectionFrame.boxes.forEach { box ->
             val displayBox = box

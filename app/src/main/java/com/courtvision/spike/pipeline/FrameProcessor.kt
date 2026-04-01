@@ -1,7 +1,6 @@
 package com.courtvision.spike.pipeline
 
 import android.graphics.Bitmap
-import android.util.Log
 import androidx.camera.core.ImageProxy
 import java.nio.MappedByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -56,7 +55,6 @@ class FrameProcessor(
     private val _detections = MutableStateFlow(DetectionFrame())
     override val detections: StateFlow<DetectionFrame> = _detections.asStateFlow()
 
-    private var lastLoggedRotation = -1
 
     private val _isSwitchingMode = MutableStateFlow(false)
     override val isSwitchingMode: StateFlow<Boolean> = _isSwitchingMode.asStateFlow()
@@ -286,7 +284,6 @@ class FrameProcessor(
 
             val rotationDegrees = image.imageInfo.rotationDegrees
             val normalizedRotation = ((rotationDegrees % 360) + 360) % 360
-            val rotationChanged = normalizedRotation != lastLoggedRotation
 
             val bitmap = image.toBitmap()
             val processor = imageProcessors[normalizedRotation] ?: imageProcessors[0]!!
@@ -306,12 +303,6 @@ class FrameProcessor(
             }
             bitmap.recycle()
 
-            if (rotationChanged) {
-                Log.d("CV_Rotation", "ROTATION raw=$rotationDegrees normalized=$normalizedRotation")
-                Log.d("CV_Rotation", "PREPROCESS bitmapW=$bitmapW bitmapH=$bitmapH tensorW=${tensorImage.width} tensorH=${tensorImage.height} rot90count=$rot90count")
-                Log.d("CV_Rotation", "DIMS rotatedW=$rotatedWidth rotatedH=$rotatedHeight")
-                lastLoggedRotation = normalizedRotation
-            }
 
             val inputBuffer = tensorImage.buffer
             val inferenceStartNs = System.nanoTime()
@@ -329,13 +320,6 @@ class FrameProcessor(
             }
             val inferenceMs = (System.nanoTime() - inferenceStartNs) / 1_000_000.0
             lastInferenceMs.set(inferenceMs)
-            if (rotationChanged && boxes.isNotEmpty()) {
-                val b = boxes[0]
-                Log.d("CV_Rotation", "BOX[0] class=${b.label} conf=${"%.2f".format(b.confidence)} ltrb=[${b.left}, ${b.top}, ${b.right}, ${b.bottom}]")
-            }
-            if (rotationChanged) {
-                Log.d("CV_Rotation", "EMIT rotation=0(hardcoded) srcW=$rotatedWidth srcH=$rotatedHeight boxCount=${boxes.size}")
-            }
             _detections.value = DetectionFrame(
                 timestampNs = image.imageInfo.timestamp,
                 sourceWidth = rotatedWidth,
