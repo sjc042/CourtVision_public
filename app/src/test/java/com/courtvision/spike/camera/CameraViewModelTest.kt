@@ -9,6 +9,7 @@ import com.courtvision.spike.pipeline.GpuStatus
 import com.courtvision.spike.pipeline.InferenceMode
 import com.courtvision.spike.pipeline.PerformanceLogger
 import com.courtvision.spike.pipeline.PipelineStats
+import com.courtvision.spike.pipeline.RotationTelemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -153,6 +154,7 @@ class CameraViewModelTest {
         private val detectionsFlow = MutableStateFlow(DetectionFrame())
         private val switchingFlow = MutableStateFlow(false)
         private val errorFlow = MutableStateFlow<String?>(null)
+        private val rotationTelemetryFlow = MutableStateFlow(RotationTelemetry())
 
         var resetInterpreterCalls: Int = 0
         var lastSetMode: InferenceMode? = null
@@ -161,6 +163,7 @@ class CameraViewModelTest {
         override val detections: StateFlow<DetectionFrame> = detectionsFlow
         override val isSwitchingMode: StateFlow<Boolean> = switchingFlow
         override val lastError: StateFlow<String?> = errorFlow
+        override val rotationTelemetry: StateFlow<RotationTelemetry> = rotationTelemetryFlow
 
         override fun submitImage(image: ImageProxy) {
             image.close()
@@ -169,6 +172,17 @@ class CameraViewModelTest {
         override fun setInferenceMode(mode: InferenceMode) {
             lastSetMode = mode
             statsFlow.value = statsFlow.value.copy(delegateMode = mode)
+        }
+
+        override fun updateExpectedRotation(
+            expectedTargetRotation: Int,
+            expectedFrameRotationDegrees: Int,
+            source: String
+        ) {
+            rotationTelemetryFlow.value = rotationTelemetryFlow.value.copy(
+                expectedTargetRotation = expectedTargetRotation,
+                expectedFrameRotationDegrees = expectedFrameRotationDegrees
+            )
         }
 
         override fun resetInterpreter() {

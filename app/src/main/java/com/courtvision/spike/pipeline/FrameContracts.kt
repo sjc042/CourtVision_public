@@ -43,6 +43,22 @@ enum class InferenceMode {
     NNAPI
 }
 
+enum class RotationStallState {
+    NONE,
+    MISMATCH,
+    RECONCILE,
+    RECOVERY_REQUESTED
+}
+
+data class RotationTelemetry(
+    val expectedTargetRotation: Int = -1,
+    val expectedFrameRotationDegrees: Int = -1,
+    val frameRotationDegrees: Int = -1,
+    val rotationMismatchMs: Long = 0L,
+    val droppedFramesSnapshot: Long = 0L,
+    val stallState: RotationStallState = RotationStallState.NONE
+)
+
 data class DetectionBox(
     val classId: Int,
     val label: String,

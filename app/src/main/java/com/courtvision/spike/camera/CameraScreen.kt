@@ -2,8 +2,10 @@ package com.courtvision.spike.camera
 
 import android.Manifest
 import android.content.Context
-import android.hardware.display.DisplayManager
+import android.view.OrientationEventListener
+import android.view.Surface
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.graphics.Paint
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -56,9 +58,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.courtvision.spike.pipeline.DetectionFrame
 import com.courtvision.spike.pipeline.InferenceMode
+import com.courtvision.spike.pipeline.RotationStallState
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 @Composable
@@ -121,10 +129,8 @@ private fun CameraPreview(
         }
     }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    val displayManager = remember {
-        context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-    }
-    var displayListenerRef by remember { mutableStateOf<DisplayManager.DisplayListener?>(null) }
+    var orientationListenerRef by remember { mutableStateOf<OrientationEventListener?>(null) }
+    var reconcileJobRef by remember { mutableStateOf<Job?>(null) }
 
     LaunchedEffect(previewView, lifecycleOwner) {
         try {
@@ -142,26 +148,121 @@ private fun CameraPreview(
             analysis.setAnalyzer(cameraExecutor, viewModel.imageAnalyzer())
 
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
+            val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
                 analysis
             )
 
-            // Keep ImageAnalysis.targetRotation in sync with display rotation
-            // so CameraX reports the correct rotationDegrees on each frame.
-            val listener = object : DisplayManager.DisplayListener {
-                override fun onDisplayChanged(displayId: Int) {
-                    val display = displayManager.getDisplay(displayId) ?: return
-                    preview.targetRotation = display.rotation
-                    analysis.targetRotation = display.rotation
+            val expectedTargetRotation = AtomicInteger(
+                normalizeSurfaceRotation(previewView.display?.rotation ?: Surface.ROTATION_0)
+            )
+            var applySeq = 0L
+            var lastRecoveryRebindElapsedMs = -1L
+
+            fun applyTargetRotation(targetRotation: Int, source: String) {
+                val normalizedTarget = normalizeSurfaceRotation(targetRotation)
+                val callbackIndex = ++applySeq
+                val eventUptimeMs = SystemClock.uptimeMillis()
+                val callbackStartNs = SystemClock.elapsedRealtimeNanos()
+                val callbackThread = Thread.currentThread().name
+                val previousExpectedTarget = expectedTargetRotation.getAndSet(normalizedTarget)
+                val analysisBefore = analysis.targetRotation
+                val previewBefore = preview.targetRotation
+                preview.targetRotation = normalizedTarget
+                analysis.targetRotation = normalizedTarget
+                val expectedFrameRotationDegrees =
+                    camera.cameraInfo.getSensorRotationDegrees(normalizedTarget)
+
+                viewModel.updateExpectedRotation(
+                    expectedTargetRotation = normalizedTarget,
+                    expectedFrameRotationDegrees = expectedFrameRotationDegrees,
+                    source = source
+                )
+
+                val callbackDurationMs =
+                    (SystemClock.elapsedRealtimeNanos() - callbackStartNs) / 1_000_000.0
+                if (ROTATION_DEBUG_LOGS) {
+                    android.util.Log.i(
+                        CV_ROTATION_TAG,
+                        "[UI][TARGET_APPLY] seq=$callbackIndex source=$source eventUptimeMs=$eventUptimeMs thread=$callbackThread " +
+                            "expectedTargetBefore=$previousExpectedTarget expectedTargetAfter=$normalizedTarget " +
+                            "expectedRaw=$expectedFrameRotationDegrees analysisTargetBefore=$analysisBefore analysisTargetAfter=${analysis.targetRotation} " +
+                            "previewTargetBefore=$previewBefore previewTargetAfter=${preview.targetRotation} " +
+                            "callbackDurationMs=${"%.3f".format(callbackDurationMs)}"
+                    )
                 }
-                override fun onDisplayAdded(displayId: Int) {}
-                override fun onDisplayRemoved(displayId: Int) {}
             }
-            displayManager.registerDisplayListener(listener, null)
-            displayListenerRef = listener
+
+            val orientationListener = object : OrientationEventListener(context) {
+                override fun onOrientationChanged(orientation: Int) {
+                    if (orientation == ORIENTATION_UNKNOWN) return
+                    val newRotation = orientationToSurfaceRotation(orientation)
+                    if (newRotation != expectedTargetRotation.get()) {
+                        if (ROTATION_DEBUG_LOGS) {
+                            android.util.Log.i(
+                                CV_ROTATION_TAG,
+                                "[UI][OEL_ROT_CHANGE] orientation=$orientation targetRotation=$newRotation expectedTarget=${expectedTargetRotation.get()}"
+                            )
+                        }
+                        applyTargetRotation(newRotation, source = "orientation_event")
+                    }
+                }
+            }
+            orientationListener.enable()
+            orientationListenerRef = orientationListener
+
+            applyTargetRotation(expectedTargetRotation.get(), source = "initial_bind")
+
+            val reconcileJob = launch {
+                while (isActive) {
+                    delay(RECONCILE_TICK_MS)
+                    val telemetry = viewModel.rotationTelemetrySnapshot()
+                    val stallState = telemetry.stallState
+                    if (stallState != RotationStallState.RECONCILE &&
+                        stallState != RotationStallState.RECOVERY_REQUESTED
+                    ) {
+                        continue
+                    }
+
+                    val expectedTarget = expectedTargetRotation.get()
+                    android.util.Log.w(
+                        CV_ROTATION_TAG,
+                        "[UI][RECONCILE_APPLY] expectedTarget=$expectedTarget expectedRaw=${telemetry.expectedFrameRotationDegrees} " +
+                            "frameRaw=${telemetry.frameRotationDegrees} mismatchMs=${telemetry.rotationMismatchMs} stallState=$stallState dropped=${telemetry.droppedFramesSnapshot}"
+                    )
+                    applyTargetRotation(expectedTarget, source = "reconcile_tick")
+
+                    val nowMs = SystemClock.elapsedRealtime()
+                    val shouldRebind = stallState == RotationStallState.RECOVERY_REQUESTED &&
+                        (lastRecoveryRebindElapsedMs < 0L ||
+                            nowMs - lastRecoveryRebindElapsedMs >= RECOVERY_REBIND_COOLDOWN_MS)
+                    if (!shouldRebind) continue
+
+                    try {
+                        android.util.Log.w(
+                            CV_ROTATION_TAG,
+                            "[UI][ROT_RECOVERY_REBIND] expectedTarget=$expectedTarget expectedRaw=${telemetry.expectedFrameRotationDegrees} " +
+                                "frameRaw=${telemetry.frameRotationDegrees} mismatchMs=${telemetry.rotationMismatchMs}"
+                        )
+                        cameraProvider.unbind(analysis)
+                        analysis.setAnalyzer(cameraExecutor, viewModel.imageAnalyzer())
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            analysis
+                        )
+                        lastRecoveryRebindElapsedMs = nowMs
+                        applyTargetRotation(expectedTarget, source = "recovery_rebind")
+                    } catch (error: Throwable) {
+                        viewModel.onCameraError(
+                            "Rotation recovery rebind failed: ${error.message ?: "unknown error"}"
+                        )
+                    }
+                }
+            }
+            reconcileJobRef = reconcileJob
 
             viewModel.onCameraStarted()
         } catch (error: Throwable) {
@@ -171,7 +272,8 @@ private fun CameraPreview(
 
     DisposableEffect(Unit) {
         onDispose {
-            displayListenerRef?.let { displayManager.unregisterDisplayListener(it) }
+            orientationListenerRef?.disable()
+            reconcileJobRef?.cancel()
             try {
                 ProcessCameraProvider.getInstance(context).get().unbindAll()
             } catch (_: Throwable) {
@@ -525,3 +627,27 @@ private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider {
         )
     }
 }
+
+private fun orientationToSurfaceRotation(orientationDegrees: Int): Int {
+    return when (orientationDegrees) {
+        in 45 until 135 -> Surface.ROTATION_270
+        in 135 until 225 -> Surface.ROTATION_180
+        in 225 until 315 -> Surface.ROTATION_90
+        else -> Surface.ROTATION_0
+    }
+}
+
+private fun normalizeSurfaceRotation(rotation: Int): Int {
+    return when (rotation) {
+        Surface.ROTATION_0,
+        Surface.ROTATION_90,
+        Surface.ROTATION_180,
+        Surface.ROTATION_270 -> rotation
+        else -> Surface.ROTATION_0
+    }
+}
+
+private const val CV_ROTATION_TAG = "CVRotation"
+private const val ROTATION_DEBUG_LOGS = false
+private const val RECONCILE_TICK_MS = 1_000L
+private const val RECOVERY_REBIND_COOLDOWN_MS = 5_000L

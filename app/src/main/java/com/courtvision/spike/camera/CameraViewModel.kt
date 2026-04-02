@@ -15,6 +15,7 @@ import com.courtvision.spike.pipeline.InferenceMode
 import com.courtvision.spike.pipeline.NnApiDelegateProbe
 import com.courtvision.spike.pipeline.PerformanceCsvLogger
 import com.courtvision.spike.pipeline.PerformanceLogger
+import com.courtvision.spike.pipeline.RotationTelemetry
 import com.courtvision.spike.pipeline.SpikeImageAnalyzer
 import java.io.FileInputStream
 import java.nio.MappedByteBuffer
@@ -57,6 +58,7 @@ class CameraViewModel(
         _uiState.value.modelConfirmed
     }
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
+    val rotationTelemetry: StateFlow<RotationTelemetry> = frameProcessor.rotationTelemetry
 
     @Volatile
     private var cachedModelBuffer: MappedByteBuffer? = null
@@ -174,6 +176,20 @@ class CameraViewModel(
             )
         }
     }
+
+    fun updateExpectedRotation(
+        expectedTargetRotation: Int,
+        expectedFrameRotationDegrees: Int,
+        source: String
+    ) {
+        frameProcessor.updateExpectedRotation(
+            expectedTargetRotation = expectedTargetRotation,
+            expectedFrameRotationDegrees = expectedFrameRotationDegrees,
+            source = source
+        )
+    }
+
+    fun rotationTelemetrySnapshot(): RotationTelemetry = frameProcessor.rotationTelemetry.value
 
     fun setModel(modelPath: String) {
         if (isModelSelectionLocked()) return

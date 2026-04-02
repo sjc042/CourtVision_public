@@ -8,9 +8,15 @@ interface FrameProcessorGateway {
     val detections: StateFlow<DetectionFrame>
     val isSwitchingMode: StateFlow<Boolean>
     val lastError: StateFlow<String?>
+    val rotationTelemetry: StateFlow<RotationTelemetry>
 
     fun submitImage(image: ImageProxy)
     fun setInferenceMode(mode: InferenceMode)
+    fun updateExpectedRotation(
+        expectedTargetRotation: Int,
+        expectedFrameRotationDegrees: Int,
+        source: String
+    )
     fun resetInterpreter()
     fun shutdown()
 }

@@ -1,6 +1,8 @@
 package com.courtvision.spike.pipeline
 
 import android.graphics.Bitmap
+import android.util.Log
+import android.os.SystemClock
 import androidx.camera.core.ImageProxy
 import java.nio.MappedByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -49,6 +51,12 @@ class FrameProcessor(
     private val windowDurationsMs = ConcurrentLinkedQueue<Double>()
     private val pendingMode = AtomicReference<InferenceMode?>(null)
     private val currentMode = AtomicReference(InferenceMode.CPU)
+    private val expectedTargetRotation = AtomicInteger(-1)
+    private val expectedFrameRotationDegrees = AtomicInteger(-1)
+    private var lastNormalizedRotation: Int = -1
+    private var lastImageTimestampNs: Long = -1L
+    private var rotationMismatchStartElapsedMs: Long = -1L
+    private var lastRotationStallLogElapsedMs: Long = -1L
 
     private val _stats = MutableStateFlow(PipelineStats())
     override val stats: StateFlow<PipelineStats> = _stats.asStateFlow()
@@ -62,6 +70,9 @@ class FrameProcessor(
 
     private val _lastError = MutableStateFlow<String?>(null)
     override val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
+    private val _rotationTelemetry = MutableStateFlow(RotationTelemetry())
+    override val rotationTelemetry: StateFlow<RotationTelemetry> = _rotationTelemetry.asStateFlow()
 
     // Rot90Op takes counter-clockwise 90° rotation count.
     // CameraX rotationDegrees is clockwise, so:
@@ -160,6 +171,36 @@ class FrameProcessor(
         _isSwitchingMode.value = true
         scope.launch(consumerDispatcher) {
             maybeApplyPendingMode(force = true)
+        }
+    }
+
+    override fun updateExpectedRotation(
+        expectedTargetRotation: Int,
+        expectedFrameRotationDegrees: Int,
+        source: String
+    ) {
+        val normalizedTarget = when (expectedTargetRotation) {
+            0, 1, 2, 3 -> expectedTargetRotation
+            else -> 0
+        }
+        val normalizedFrame = when (expectedFrameRotationDegrees) {
+            0, 90, 180, 270 -> expectedFrameRotationDegrees
+            else -> -1
+        }
+
+        this.expectedTargetRotation.set(normalizedTarget)
+        this.expectedFrameRotationDegrees.set(normalizedFrame)
+        _rotationTelemetry.update {
+            it.copy(
+                expectedTargetRotation = normalizedTarget,
+                expectedFrameRotationDegrees = normalizedFrame
+            )
+        }
+        if (ROTATION_DEBUG_LOGS) {
+            Log.i(
+                TAG,
+                "[FRAME][EXPECTED_ROT] source=$source expectedTarget=$normalizedTarget expectedRaw=$normalizedFrame"
+            )
         }
     }
 
@@ -307,8 +348,45 @@ class FrameProcessor(
             }
             val localInterpreter = interpreter ?: return
 
+            val imageTimestampNs = image.imageInfo.timestamp
             val rotationDegrees = image.imageInfo.rotationDegrees
             val normalizedRotation = ((rotationDegrees % 360) + 360) % 360
+            val deltaMs = if (lastImageTimestampNs > 0L) {
+                (imageTimestampNs - lastImageTimestampNs) / 1_000_000.0
+            } else {
+                -1.0
+            }
+            lastImageTimestampNs = imageTimestampNs
+            val mode = currentMode.get()
+            val expectedTarget = expectedTargetRotation.get()
+            val expectedRaw = expectedFrameRotationDegrees.get()
+
+            updateRotationTelemetry(
+                frameRotationDegrees = rotationDegrees,
+                expectedTarget = expectedTarget,
+                expectedRaw = expectedRaw
+            )
+
+            if (ROTATION_DEBUG_LOGS && normalizedRotation != lastNormalizedRotation) {
+                if (lastNormalizedRotation != -1) {
+                    Log.i(
+                        TAG,
+                        "[FRAME][ROT_CHANGE] tsNs=$imageTimestampNs deltaMs=${"%.3f".format(deltaMs)} " +
+                            "rawRot=$rotationDegrees normRot=$normalizedRotation prevNormRot=$lastNormalizedRotation " +
+                            "mode=$mode dropped=${droppedByOverflow.get()} queueDepth=${queueDepth.get()} " +
+                            "expectedTarget=$expectedTarget expectedRaw=$expectedRaw"
+                    )
+                } else {
+                    Log.i(
+                        TAG,
+                        "[FRAME][FIRST_ROT] tsNs=$imageTimestampNs deltaMs=NA " +
+                            "rawRot=$rotationDegrees normRot=$normalizedRotation mode=$mode " +
+                            "dropped=${droppedByOverflow.get()} queueDepth=${queueDepth.get()} " +
+                            "expectedTarget=$expectedTarget expectedRaw=$expectedRaw"
+                    )
+                }
+                lastNormalizedRotation = normalizedRotation
+            }
 
             val bitmap = image.toBitmap()
             val processor = imageProcessors[normalizedRotation] ?: imageProcessors[0]!!
@@ -346,7 +424,7 @@ class FrameProcessor(
             val inferenceMs = (System.nanoTime() - inferenceStartNs) / 1_000_000.0
             lastInferenceMs.set(inferenceMs)
             _detections.value = DetectionFrame(
-                timestampNs = image.imageInfo.timestamp,
+                timestampNs = imageTimestampNs,
                 sourceWidth = rotatedWidth,
                 sourceHeight = rotatedHeight,
                 rotationDegrees = 0,
@@ -491,6 +569,84 @@ class FrameProcessor(
     private fun classLabel(classId: Int): String =
         CUSTOM_CLASS_NAMES.getOrElse(classId) { "class$classId" }
 
+    private fun updateRotationTelemetry(
+        frameRotationDegrees: Int,
+        expectedTarget: Int,
+        expectedRaw: Int
+    ) {
+        val dropped = droppedByOverflow.get()
+        val nowMs = SystemClock.elapsedRealtime()
+
+        if (expectedRaw !in VALID_ROTATIONS_DEGREES) {
+            rotationMismatchStartElapsedMs = -1L
+            _rotationTelemetry.value = RotationTelemetry(
+                expectedTargetRotation = expectedTarget,
+                expectedFrameRotationDegrees = expectedRaw,
+                frameRotationDegrees = frameRotationDegrees,
+                rotationMismatchMs = 0L,
+                droppedFramesSnapshot = dropped,
+                stallState = RotationStallState.NONE
+            )
+            return
+        }
+
+        if (frameRotationDegrees == expectedRaw) {
+            val previousMismatchMs = if (rotationMismatchStartElapsedMs >= 0L) {
+                nowMs - rotationMismatchStartElapsedMs
+            } else {
+                0L
+            }
+            if (rotationMismatchStartElapsedMs >= 0L && previousMismatchMs >= RECONCILE_THRESHOLD_MS) {
+                Log.i(
+                    TAG,
+                    "[FRAME][ROT_STALL_RESOLVED] mismatchMs=$previousMismatchMs frameRaw=$frameRotationDegrees expectedRaw=$expectedRaw expectedTarget=$expectedTarget dropped=$dropped"
+                )
+            }
+            rotationMismatchStartElapsedMs = -1L
+            _rotationTelemetry.value = RotationTelemetry(
+                expectedTargetRotation = expectedTarget,
+                expectedFrameRotationDegrees = expectedRaw,
+                frameRotationDegrees = frameRotationDegrees,
+                rotationMismatchMs = 0L,
+                droppedFramesSnapshot = dropped,
+                stallState = RotationStallState.NONE
+            )
+            return
+        }
+
+        if (rotationMismatchStartElapsedMs < 0L) {
+            rotationMismatchStartElapsedMs = nowMs
+        }
+
+        val mismatchMs = nowMs - rotationMismatchStartElapsedMs
+        val stallState = when {
+            dropped != 0L -> RotationStallState.MISMATCH
+            mismatchMs >= RECOVERY_THRESHOLD_MS -> RotationStallState.RECOVERY_REQUESTED
+            mismatchMs >= RECONCILE_THRESHOLD_MS -> RotationStallState.RECONCILE
+            else -> RotationStallState.MISMATCH
+        }
+
+        _rotationTelemetry.value = RotationTelemetry(
+            expectedTargetRotation = expectedTarget,
+            expectedFrameRotationDegrees = expectedRaw,
+            frameRotationDegrees = frameRotationDegrees,
+            rotationMismatchMs = mismatchMs,
+            droppedFramesSnapshot = dropped,
+            stallState = stallState
+        )
+
+        if (dropped == 0L &&
+            mismatchMs >= RECONCILE_THRESHOLD_MS &&
+            (lastRotationStallLogElapsedMs < 0L || nowMs - lastRotationStallLogElapsedMs >= STALL_LOG_INTERVAL_MS)
+        ) {
+            Log.w(
+                TAG,
+                "[FRAME][ROT_STALL] mismatchMs=$mismatchMs frameRaw=$frameRotationDegrees expectedRaw=$expectedRaw expectedTarget=$expectedTarget dropped=$dropped stallState=$stallState"
+            )
+            lastRotationStallLogElapsedMs = nowMs
+        }
+    }
+
     private fun publishWindowStats() {
         val samples = mutableListOf<Double>()
         while (true) {
@@ -536,6 +692,11 @@ class FrameProcessor(
     }
 
     companion object {
+        private const val TAG = "CVRotation"
+        private const val ROTATION_DEBUG_LOGS = false
+        private const val RECONCILE_THRESHOLD_MS = 2_000L
+        private const val RECOVERY_THRESHOLD_MS = 5_000L
+        private const val STALL_LOG_INTERVAL_MS = 1_000L
         private const val MODEL_INPUT_SIZE = 640
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.40f
@@ -544,6 +705,7 @@ class FrameProcessor(
         private const val E2E_MAX_DETS = 300
         private const val E2E_FIELDS = 6
 
+        private val VALID_ROTATIONS_DEGREES = setOf(0, 90, 180, 270)
         private val CUSTOM_CLASS_NAMES = arrayOf("ball", "made", "person", "rim", "shoot")
     }
 }
