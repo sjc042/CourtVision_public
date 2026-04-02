@@ -39,6 +39,8 @@
 | ADR | Description |
 | --- | --- |
 | [ADR-001](decisions/001-single-yolo-model.md) | Single multi-class YOLO model for ball + hoop detection |
+| [ADR-002](decisions/002-support-lib-preprocessing.md) | Use TFLite Support Library preprocessing (`ImageProcessor`) |
+| [ADR-003](decisions/003-rotation-source-of-truth.md) | Orientation-driven CameraX rotation control with stall recovery |
 
 ---
 

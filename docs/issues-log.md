@@ -589,6 +589,15 @@ After a rotation change, there is a ~1-2 second delay before `rotationDegrees` u
 
 Net effect: a brief transition window where a few frames process with the old rotation. This does not affect steady-state correctness and is inherent to the CameraX architecture.
 
+**Update (2026-04-02)**
+
+Display-driven rotation callbacks were later found to be unreliable in GPU-mode rapid rotation scenarios. Canonical fix now uses `OrientationEventListener` as the source of truth for `targetRotation` updates, with runtime mismatch telemetry and guarded recovery:
+- Reconcile `targetRotation` when expected vs frame rotation mismatch persists >=2s with `droppedFrames=0`
+- Rebind `ImageAnalysis` only when mismatch persists >=5s
+
+Decision captured in ADR-003: `docs/decisions/003-rotation-source-of-truth.md`.
+
 **Status:** ✅ Fixed
 
 ---
+
