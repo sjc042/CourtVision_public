@@ -308,17 +308,10 @@ private fun DetectionOverlay(
         val canvasW = size.width
         val canvasH = size.height
 
-        // Effective source dimensions after rotation (sensor reports landscape W×H).
-        val rotation = detectionFrame.rotationDegrees
-        val effectiveSrcW: Float
-        val effectiveSrcH: Float
-        if (rotation == 90 || rotation == 270) {
-            effectiveSrcW = detectionFrame.sourceHeight.toFloat()
-            effectiveSrcH = detectionFrame.sourceWidth.toFloat()
-        } else {
-            effectiveSrcW = detectionFrame.sourceWidth.toFloat()
-            effectiveSrcH = detectionFrame.sourceHeight.toFloat()
-        }
+        // FrameProcessor pre-applies rotation via Rot90Op before inference, so sourceWidth/Height
+        // are already in display orientation (e.g. portrait: 720×1280). rotationDegrees is always 0.
+        val effectiveSrcW = detectionFrame.sourceWidth.toFloat()
+        val effectiveSrcH = detectionFrame.sourceHeight.toFloat()
 
         // FILL_CENTER: scale image to fully cover the canvas, then center-crop overflow.
         val scale = if (effectiveSrcW > 0f && effectiveSrcH > 0f) {

@@ -389,12 +389,15 @@ class FrameProcessor(
             }
 
             val bitmap = image.toBitmap()
-            val processor = imageProcessors[normalizedRotation] ?: imageProcessors[0]!!
-            val rot90count = when (normalizedRotation) { 90 -> 3; 180 -> 2; 270 -> 1; else -> 0 }
-            val tensorImage = processor.process(TensorImage.fromBitmap(bitmap))
-
             val bitmapW = bitmap.width
             val bitmapH = bitmap.height
+            val processor = imageProcessors[normalizedRotation] ?: imageProcessors[0]!!
+            val tensorImage = try {
+                processor.process(TensorImage.fromBitmap(bitmap))
+            } finally {
+                bitmap.recycle()
+            }
+
             val rotatedWidth: Int
             val rotatedHeight: Int
             if (normalizedRotation == 90 || normalizedRotation == 270) {
@@ -404,7 +407,6 @@ class FrameProcessor(
                 rotatedWidth = bitmapW
                 rotatedHeight = bitmapH
             }
-            bitmap.recycle()
 
 
             val inputBuffer = tensorImage.buffer
