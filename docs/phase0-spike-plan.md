@@ -151,12 +151,11 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 | Runtime | FPS, RAM, thermal, battery | 10-min continuous session logs |
 
 ### 3) Pass/Fail Thresholds (Day 8 Gate)
-
+- End-to-end FPS >= 20 sustained for 10 minutes (target 30)
+- Ball detection latency p50 < 20ms (p95 < 60ms)
+- Pose inference latency p50 < 20ms (p95 < 50ms)
 - Shot detection F1 >= 0.90 on Gate Set
 - Make/Miss accuracy >= 0.90 on Gate Set
-- Ball detection latency p50 < 100ms (p95 < 140ms)
-- Pose inference latency p50 < 50ms (p95 < 70ms)
-- End-to-end FPS >= 20 sustained for 10 minutes (target 30)
 - RAM < 400MB sustained
 - No severe thermal throttling event during 10-minute run
 

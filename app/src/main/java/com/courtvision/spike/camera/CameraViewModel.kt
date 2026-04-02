@@ -12,6 +12,7 @@ import com.courtvision.spike.pipeline.GpuDelegateProbe
 import com.courtvision.spike.pipeline.GpuProbeResult
 import com.courtvision.spike.pipeline.DetectionFrame
 import com.courtvision.spike.pipeline.InferenceMode
+import com.courtvision.spike.pipeline.NnApiDelegateProbe
 import com.courtvision.spike.pipeline.PerformanceCsvLogger
 import com.courtvision.spike.pipeline.PerformanceLogger
 import com.courtvision.spike.pipeline.SpikeImageAnalyzer
@@ -61,8 +62,17 @@ class CameraViewModel(
     private var cachedModelBuffer: MappedByteBuffer? = null
 
     init {
+        // Phase 0 decision: keep probes synchronous in init for deterministic startup behavior.
+        // Phase 2 note: move delegate probes to Dispatchers.Default to avoid any JNI work on Main.
         val probeResult = overrides?.gpuProbeResult ?: GpuDelegateProbe.probe()
-        _uiState.update { it.copy(gpuProbeResult = probeResult) }
+        val nnApiResult = overrides?.nnApiProbeResult ?: NnApiDelegateProbe.probe()
+        _uiState.update {
+            it.copy(
+                gpuProbeResult = probeResult,
+                nnApiProbeResult = nnApiResult,
+                nnApiAvailable = nnApiResult.startsWith("NNAPI_AVAILABLE")
+            )
+        }
 
         viewModelScope.launch {
             frameProcessor.stats.collect { stats ->
@@ -307,6 +317,7 @@ class CameraViewModel(
         val performanceLogger: PerformanceLogger? = null,
         val modelPaths: List<String>? = null,
         val initialModelPath: String? = null,
-        val gpuProbeResult: GpuProbeResult? = null
+        val gpuProbeResult: GpuProbeResult? = null,
+        val nnApiProbeResult: String? = null
     )
 }

@@ -45,7 +45,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 
 > Full spike plan: [docs/phase0-spike-plan.md](docs/phase0-spike-plan.md)
 
-**Progress:** Days 1–3 complete. Weekend training track complete (YOLOv8n trained at 640/480/320). Currently preparing for Day 4 (Kalman tracker).
+**Progress:** Days 1–3 complete. Weekend training track complete (YOLOv8n trained at 640/480/320). Day 4 (Kalman tracker) in progress — plan ready, implementation starting.
 
 ### Day 8 Gate Criteria (all must pass)
 - [ ] Ball detection latency < 100ms (p95 < 140ms)

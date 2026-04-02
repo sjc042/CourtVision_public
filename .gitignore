@@ -19,3 +19,6 @@ app/src/main/assets/*.pt
 app/src/main/assets/*.onnx
 app/src/main/assets/*.npy
 app/src/main/assets/*_saved_model/
+
+# AI research reports (local reference only)
+research-reports/

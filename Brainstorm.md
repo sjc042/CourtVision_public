@@ -17,3 +17,7 @@
         4. Keep only low frequencies — take just the top-left hash_size × hash_size block (e.g. 16×16 = 256 values). This is the structural "fingerprint" of the image, ignoring texture and noise.
         5. Binarize — compute the mean of those 256 values, then for each value: 1 if above mean, 0 if below. This gives you a 256-bit hash.
 ---
+
+### 03/31/2026
+- MediaPose detection may not need to run every frame, but just on single or a few temporal adjecent frames of shot taking frame. This may reduce some computation overhead.
+- Use difference conf-threshold for different classes based on prevision/recall.

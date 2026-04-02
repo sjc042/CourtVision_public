@@ -45,7 +45,8 @@ class CameraViewModelTest {
             performanceLogger = FakePerformanceLogger(),
             modelPaths = listOf(MODEL_A, MODEL_B),
             initialModelPath = MODEL_A,
-            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED)
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE
         )
         val viewModel = CameraViewModel(Application())
 
@@ -71,7 +72,8 @@ class CameraViewModelTest {
             performanceLogger = FakePerformanceLogger(),
             modelPaths = listOf(MODEL_A, MODEL_B),
             initialModelPath = MODEL_A,
-            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED)
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE
         )
         val viewModel = CameraViewModel(Application())
 
@@ -82,6 +84,51 @@ class CameraViewModelTest {
 
             assertEquals(0, fakeProcessor.resetInterpreterCalls)
             assertEquals(MODEL_A, viewModel.uiState.value.selectedModel)
+        } finally {
+            clearViewModel(viewModel)
+        }
+    }
+
+    @Test
+    fun init_exposesNnApiProbeResult_fromOverrides() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_UNAVAILABLE
+        )
+        val viewModel = CameraViewModel(Application())
+
+        try {
+            assertEquals(NNAPI_UNAVAILABLE, viewModel.uiState.value.nnApiProbeResult)
+            assertEquals(false, viewModel.uiState.value.nnApiAvailable)
+        } finally {
+            clearViewModel(viewModel)
+        }
+    }
+
+    @Test
+    fun setInferenceMode_nnApi_propagatesToProcessorAndUi() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE
+        )
+        val viewModel = CameraViewModel(Application())
+
+        try {
+            viewModel.setInferenceMode(InferenceMode.NNAPI)
+
+            assertEquals(true, viewModel.uiState.value.nnApiAvailable)
+            assertEquals(InferenceMode.NNAPI, fakeProcessor.lastSetMode)
+            assertEquals(InferenceMode.NNAPI, viewModel.uiState.value.selectedMode)
         } finally {
             clearViewModel(viewModel)
         }
@@ -108,6 +155,7 @@ class CameraViewModelTest {
         private val errorFlow = MutableStateFlow<String?>(null)
 
         var resetInterpreterCalls: Int = 0
+        var lastSetMode: InferenceMode? = null
 
         override val stats: StateFlow<PipelineStats> = statsFlow
         override val detections: StateFlow<DetectionFrame> = detectionsFlow
@@ -119,6 +167,7 @@ class CameraViewModelTest {
         }
 
         override fun setInferenceMode(mode: InferenceMode) {
+            lastSetMode = mode
             statsFlow.value = statsFlow.value.copy(delegateMode = mode)
         }
 
@@ -132,6 +181,8 @@ class CameraViewModelTest {
     private companion object {
         private const val MODEL_A = "yolov8n_saved_model/yolov8n_float16.tflite"
         private const val MODEL_B = "custom_saved_model/custom_float16.tflite"
+        private const val NNAPI_AVAILABLE = "NNAPI_AVAILABLE"
+        private const val NNAPI_UNAVAILABLE = "NNAPI_UNAVAILABLE: test"
     }
 }
 

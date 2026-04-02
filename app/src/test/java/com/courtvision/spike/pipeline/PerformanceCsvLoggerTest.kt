@@ -39,4 +39,18 @@ class PerformanceCsvLoggerTest {
         assertTrue(row.contains(",yolo11s_saved_model/yolo11s_float32.tflite,"))
         assertTrue(row.endsWith("GPU_SUPPORTED\n"))
     }
+
+    @Test
+    fun buildCsvRow_serializesNnApiDelegateMode() {
+        val row = PerformanceCsvLogger.buildCsvRow(
+            timestamp = "2026-03-28 09:00:00",
+            stats = PipelineStats(
+                delegateMode = InferenceMode.NNAPI
+            ),
+            gpuStatus = GpuStatus.GPU_SUPPORTED,
+            modelUsed = "yolov8n_saved_model/yolov8n_float16.tflite"
+        )
+
+        assertTrue(row.contains(",NNAPI,"))
+    }
 }

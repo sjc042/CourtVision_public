@@ -27,6 +27,7 @@ import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
@@ -89,6 +90,7 @@ class FrameProcessor(
 
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
+    private var nnApiDelegate: NnApiDelegate? = null
 
     private val frameChannel = Channel<FrameTask>(
         capacity = 1,
@@ -189,8 +191,12 @@ class FrameProcessor(
         }
 
         val switched = switchInterpreter(target)
-        if (!switched && target == InferenceMode.GPU) {
+        if (!switched && (target == InferenceMode.GPU || target == InferenceMode.NNAPI)) {
+            val delegateFailure = _lastError.value
             switchInterpreter(InferenceMode.CPU)
+            if (!delegateFailure.isNullOrBlank()) {
+                _lastError.value = delegateFailure
+            }
         }
         _isSwitchingMode.value = false
     }
@@ -209,29 +215,46 @@ class FrameProcessor(
             setNumThreads(4)
         }
 
-        val localDelegate = if (mode == InferenceMode.GPU) {
-            val compatibility = CompatibilityList()
-            if (!compatibility.isDelegateSupportedOnThisDevice) {
-                _lastError.value = "GPU delegate unsupported on this device"
-                return false
+        var localGpuDelegate: GpuDelegate? = null
+        var localNnApiDelegate: NnApiDelegate? = null
+
+        when (mode) {
+            InferenceMode.GPU -> {
+                val compatibility = CompatibilityList()
+                if (!compatibility.isDelegateSupportedOnThisDevice) {
+                    _lastError.value = "GPU delegate unsupported on this device"
+                    return false
+                }
+                localGpuDelegate = GpuDelegate(compatibility.bestOptionsForThisDevice).also {
+                    options.addDelegate(it)
+                }
             }
-            GpuDelegate(compatibility.bestOptionsForThisDevice).also {
-                options.addDelegate(it)
+            InferenceMode.NNAPI -> {
+                localNnApiDelegate = try {
+                    NnApiDelegate().also { options.addDelegate(it) }
+                } catch (error: Throwable) {
+                    _lastError.value =
+                        "NNAPI delegate init failed: ${error.message ?: "unknown error"}"
+                    return false
+                }
             }
-        } else {
-            null
+            InferenceMode.CPU -> {
+                // No delegate for CPU mode.
+            }
         }
 
         return try {
             val localInterpreter = Interpreter(mappedModel, options)
             validateTensorContract(localInterpreter)
             interpreter = localInterpreter
-            gpuDelegate = localDelegate
+            gpuDelegate = localGpuDelegate
+            nnApiDelegate = localNnApiDelegate
             currentMode.set(mode)
             _lastError.value = null
             true
         } catch (error: Throwable) {
-            localDelegate?.close()
+            localGpuDelegate?.close()
+            localNnApiDelegate?.close()
             _lastError.value = "Interpreter init failed: ${error.message ?: "unknown error"}"
             false
         }
@@ -273,6 +296,8 @@ class FrameProcessor(
         interpreter = null
         gpuDelegate?.close()
         gpuDelegate = null
+        nnApiDelegate?.close()
+        nnApiDelegate = null
     }
 
     private suspend fun processImage(image: ImageProxy) {

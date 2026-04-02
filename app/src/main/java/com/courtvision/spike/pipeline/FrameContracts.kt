@@ -39,7 +39,8 @@ data class GpuProbeResult(
 
 enum class InferenceMode {
     CPU,
-    GPU
+    GPU,
+    NNAPI
 }
 
 data class DetectionBox(

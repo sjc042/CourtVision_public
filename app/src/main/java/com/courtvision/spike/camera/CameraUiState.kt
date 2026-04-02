@@ -17,6 +17,8 @@ data class CameraUiState(
     val hasCameraPermission: Boolean = false,
     val stats: PipelineStats = PipelineStats(),
     val gpuProbeResult: GpuProbeResult = GpuProbeResult(),
+    val nnApiProbeResult: String = "NNAPI_UNAVAILABLE: not probed",
+    val nnApiAvailable: Boolean = false,
     val availableModels: List<String> = emptyList(),
     val selectedModel: String = "",
     val modelConfirmed: Boolean = false,

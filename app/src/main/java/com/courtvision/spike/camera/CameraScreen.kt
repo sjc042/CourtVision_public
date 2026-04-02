@@ -291,6 +291,13 @@ private fun MetricsOverlay(
             style = MaterialTheme.typography.bodySmall
         )
         Text(
+            "NNAPI Probe: ${uiState.nnApiProbeResult}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
             "Device: ${uiState.gpuProbeResult.deviceModel} | API ${uiState.gpuProbeResult.apiLevel}",
             color = Color.White,
             style = MaterialTheme.typography.bodySmall,
@@ -349,6 +356,7 @@ private fun MetricsOverlay(
         }
         InferenceModeSelector(
             selectedMode = uiState.selectedMode,
+            nnApiAvailable = uiState.nnApiAvailable,
             onModeSelect = onModeSelect
         )
         ModelSelector(
@@ -366,6 +374,7 @@ private fun MetricsOverlay(
 @Composable
 private fun InferenceModeSelector(
     selectedMode: InferenceMode,
+    nnApiAvailable: Boolean,
     onModeSelect: (InferenceMode) -> Unit
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -379,6 +388,12 @@ private fun InferenceModeSelector(
             selected = selectedMode == InferenceMode.GPU,
             onClick = { onModeSelect(InferenceMode.GPU) }
         )
+        ModeButton(
+            label = "NNAPI",
+            selected = selectedMode == InferenceMode.NNAPI,
+            enabled = nnApiAvailable,
+            onClick = { onModeSelect(InferenceMode.NNAPI) }
+        )
     }
 }
 
@@ -386,17 +401,19 @@ private fun InferenceModeSelector(
 private fun ModeButton(
     label: String,
     selected: Boolean,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    val colors = if (selected) {
-        CardDefaults.cardColors(containerColor = Color(0xFF1976D2))
-    } else {
-        CardDefaults.cardColors(containerColor = Color(0x80212121))
+    val colors = when {
+        selected -> CardDefaults.cardColors(containerColor = Color(0xFF1976D2))
+        !enabled -> CardDefaults.cardColors(containerColor = Color(0x40212121))
+        else -> CardDefaults.cardColors(containerColor = Color(0x80212121))
     }
 
     Card(colors = colors) {
         Button(
             onClick = onClick,
+            enabled = enabled,
             modifier = Modifier.width(86.dp)
         ) {
             Text(label)

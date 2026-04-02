@@ -1,9 +1,9 @@
 # Tasks — Phase 0 Spike
 
-Last updated: 2026-03-30
+Last updated: 2026-04-01
 
 ## Active branch
-spike/day3-yolo-tflite-integration
+'spike/day4-kalman-tracker' (branch from `main`)
 
 ---
 
@@ -46,32 +46,52 @@ All Day 3 goals achieved and committed. See `docs/plans/day3+weekend-plan.md` Pa
 | yolov8n | 640x640 | 0.94006 | 0.73543 | |
 | yolov8n | 480x480 | 0.93476 | 0.72150 | |
 | yolov8n | 320x320 | 0.89546 | 0.66649 | |
+| yolo11n | 640x640 | 0.93473 | 0.74061 | |
+| yolo11n | 480x480 | 0.93375 | 0.73111 | |
+
 
 ### Remaining Training
 
 | Model | Input Size | Status |
 |-------|-----------|--------|
 | yolov8s | 640 / 480 / 320 | Pending |
-| yolov11n | 640 / 480 / 320 | Pending |
+| yolov11n | 320 | Pending |
 | yolov11s | 640 / 480 / 320 | Pending |
 
 ---
 
-## Active — Post-Weekend / Day 4 Prep
+## Active — Post-Weekend / Day 4 Prep (user)
 
 1. ✅ Benchmarked manual vs Support Library preprocessing; switched to Support Library (~3× faster, resolution-independent ~19ms p50)
 2. 🔲 Complete remaining training matrix (yolov8s, yolov11n, yolov11s at 3 resolutions)
-2. 🔲 Export best model(s) to TFLite FP16, drop into Android `assets/`
-3. 🔲 Run Day 3 benchmark loop with custom-trained model — validate detection quality on-device
-4. 🔲 Update planning docs to reflect 5-class model, dataset details, and training results (in progress)
+3. 🔲 Export best model(s) to TFLite FP16, drop into Android `assets/`
+4. 🔲 Run Day 3 benchmark loop with custom-trained model — validate detection quality on-device
+5. 🔲 Update planning docs to reflect 5-class model, dataset details, and training results (in progress)
 
-## Next — Day 4: Kalman Tracker
+## Active — Day 4: Kalman Tracker
 
-- Add Kalman filter tracker on ball bounding box output
-- Track ball position and velocity across frames
-- Measure tracking stability and false positive rate
-- Output: smooth ball trajectory over a 10-shot sequence
+> Branch: 'spike/day4-kalman-tracker'
+> Plan: `./docs/plans/day4_kalman-filter-tracker.md`
+
+1. 🔲 Add `TrackedBall` data class + extend `DetectionFrame` in `FrameContracts.kt`
+2. 🔲 Implement `KalmanBallTracker.kt` — pure Kotlin, constant-velocity 4-state, `maxMissFrames` configurable at runtime
+3. 🔲 Integrate tracker into `FrameProcessor.kt` — predict+update after each NMS pass, real `dt` from frame timestamps
+4. 🔲 Propagate `trackedBall` through `CameraUiState` + `CameraViewModel`; add `setTrackerMaxMissFrames()` setter
+5. 🔲 Add miss-frame slider (range 1–30, default 10) to debug controls in `CameraScreen.kt`
+6. 🔲 Draw cyan tracker circle + velocity vector on canvas overlay in `CameraScreen.kt`
+7. 🔲 Extend CSV logging with `tracking_active, track_cx, track_cy, track_vx, track_vy, miss_streak`
+8. 🔲 Write `docs/decisions/003-kalman-ball-tracker.md` (ADR-003)
+9. 🔲 Write `KalmanBallTrackerTest` unit tests
+10. 🔲 On-device validation: 10-shot sequence, confirm smooth trajectory in exported CSV
 
 ## Out of scope (still)
 - Pose estimation (Day 5)
 - Shot detection FSM (Day 7)
+
+## Added - NNAPI Delegate Mode (2026-04-01)
+
+1. Added `InferenceMode.NNAPI` with runtime switching and CPU fallback on delegate init failure
+2. Added NNAPI probe visibility in debug overlay and mode selector gating
+3. Added unit tests covering NNAPI probe state and CSV serialization of `delegate_mode=NNAPI`
+4. Phase 0 choice: GPU/NNAPI probes run synchronously in `CameraViewModel.init`
+5. Phase 2 note: move both delegate probes to `Dispatchers.Default`
