@@ -17,7 +17,13 @@ data class PipelineStats(
     val lastInferenceMs: Double = 0.0,
     val delegateMode: InferenceMode = InferenceMode.CPU,
     val ramMb: Double = 0.0,
-    val thermalStatus: String = "UNKNOWN"
+    val thermalStatus: String = "UNKNOWN",
+    val trackingActive: Boolean = false,
+    val trackCx: Double? = null,
+    val trackCy: Double? = null,
+    val trackVx: Double? = null,
+    val trackVy: Double? = null,
+    val missStreak: Int = 0
 )
 
 interface FrameConsumer {
@@ -69,12 +75,23 @@ data class DetectionBox(
     val bottom: Float
 )
 
+data class TrackedBall(
+    val centroidX: Float,
+    val centroidY: Float,
+    val velocityX: Float,
+    val velocityY: Float,
+    val isTracked: Boolean,
+    val rawBox: DetectionBox?
+)
+
 data class DetectionFrame(
     val timestampNs: Long = 0L,
     val sourceWidth: Int = 0,
     val sourceHeight: Int = 0,
     val rotationDegrees: Int = 0,
-    val boxes: List<DetectionBox> = emptyList()
+    val boxes: List<DetectionBox> = emptyList(),
+    val trackedBall: TrackedBall? = null,
+    val missStreak: Int = 0
 )
 
 fun rotateDetectionBox(

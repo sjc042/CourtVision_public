@@ -11,6 +11,9 @@ captures/
 # Claude Code local session data
 .claude/
 
+# VSCode workspace settings
+.vscode/
+
 # Codex sandbox artifacts (should not exist locally)
 .gradle-user/
 

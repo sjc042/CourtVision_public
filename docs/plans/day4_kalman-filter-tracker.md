@@ -60,7 +60,7 @@ TDD §4.3 mentions "temporal smoothing for rim ROI." Rim smoothing is deferred t
 
 ### Create
 - `app/src/main/java/com/courtvision/spike/pipeline/KalmanBallTracker.kt`
-- `docs/decisions/003-kalman-ball-tracker.md`
+- `docs/decisions/004-kalman-ball-tracker.md`
 
 ### Modify
 - `app/src/main/java/com/courtvision/spike/pipeline/FrameContracts.kt`
@@ -244,9 +244,9 @@ Add corresponding fields to `PipelineStats` (or pass `TrackedBall?` directly to 
 
 ---
 
-### Step 7 — `ADR-003`: Document Kalman Design
+### Step 7 — `ADR-004`: Document Kalman Design
 
-Write `docs/decisions/003-kalman-ball-tracker.md` covering:
+Write `docs/decisions/004-kalman-ball-tracker.md` covering:
 - Motion model choice (constant velocity, why not acceleration)
 - Coordinate space choice (normalized [0,1])
 - Dependency decision (pure Kotlin vs EJML)

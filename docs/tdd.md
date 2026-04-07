@@ -248,12 +248,14 @@ DrillResult: id, sessionId, drillType, targetZone, completionRate, avgReleaseSpe
 
 ### 9.3 Device Testing Matrix
 
-| Device | API | Purpose |
-| --- | --- | --- |
-| Samsung Galaxy S22+ | API 33 | Primary testing device, Samsung One UI |
-| Pixel 7 | API 33 | Stock Android baseline |
-| Pixel 5a | API 31 | Mid-range performance baseline |
-| Xiaomi Redmi Note 12 | API 32 | Low-RAM performance testing |
+> Canonical source — all other docs reference this table.
+
+| Tier | Device | API | ARCore? | Purpose |
+| --- | --- | --- | --- | --- |
+| Primary | Samsung Galaxy S22+ | 33 | Yes | All gate benchmarks run here |
+| Mid-range | Pixel 6 or Pixel 7 | 33 | Yes | Cross-check p95 numbers |
+| Low-end | Xiaomi Redmi Note 12 or Galaxy A32 | 31–32 | TBD | RAM + thermal floor check |
+| High-end | Samsung Galaxy S26 Ultra | 35 | Yes | Ceiling / delegate comparison |
 
 ---
 

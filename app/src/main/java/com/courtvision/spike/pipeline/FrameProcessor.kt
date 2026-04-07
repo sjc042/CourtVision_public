@@ -51,10 +51,14 @@ class FrameProcessor(
     private val windowDurationsMs = ConcurrentLinkedQueue<Double>()
     private val pendingMode = AtomicReference<InferenceMode?>(null)
     private val currentMode = AtomicReference(InferenceMode.CPU)
+    private val latestTrackedBall = AtomicReference<TrackedBall?>(null)
+    private val latestMissStreak = AtomicInteger(0)
     private val expectedTargetRotation = AtomicInteger(-1)
     private val expectedFrameRotationDegrees = AtomicInteger(-1)
+    private val ballTracker = KalmanBallTracker()
     private var lastNormalizedRotation: Int = -1
     private var lastImageTimestampNs: Long = -1L
+    private var lastTrackerTimestampNs: Long = -1L
     private var rotationMismatchStartElapsedMs: Long = -1L
     private var lastRotationStallLogElapsedMs: Long = -1L
 
@@ -174,6 +178,19 @@ class FrameProcessor(
         }
     }
 
+    override fun setTrackerMaxMissFrames(maxMissFrames: Int) {
+        scope.launch(consumerDispatcher) {
+            ballTracker.maxMissFrames = maxMissFrames
+        }
+    }
+
+    override fun setTrackerNoise(processNoise: Float, measurementNoise: Float) {
+        scope.launch(consumerDispatcher) {
+            ballTracker.processNoise = processNoise
+            ballTracker.measurementNoise = measurementNoise
+        }
+    }
+
     override fun updateExpectedRotation(
         expectedTargetRotation: Int,
         expectedFrameRotationDegrees: Int,
@@ -199,7 +216,7 @@ class FrameProcessor(
         if (ROTATION_DEBUG_LOGS) {
             Log.i(
                 TAG,
-                "[FRAME][EXPECTED_ROT] source=$source expectedTarget=$normalizedTarget expectedRaw=$normalizedFrame"
+                "[FRAME][EXPECTED_ROT] source=$source flag=EXPECTED_ROT expectedTarget=$normalizedTarget expectedRaw=$normalizedFrame"
             )
         }
     }
@@ -210,12 +227,14 @@ class FrameProcessor(
 
     override fun resetInterpreter() {
         scope.launch(consumerDispatcher) {
+            resetTrackingState()
             closeInterpreterResources()
         }
     }
 
     override fun shutdown() {
         frameChannel.close()
+        resetTrackingState()
         closeInterpreterResources()
         consumerJob.cancel()
         aggregateJob.cancel()
@@ -244,6 +263,7 @@ class FrameProcessor(
 
     private fun switchInterpreter(mode: InferenceMode): Boolean {
         closeInterpreterResources()
+        resetTrackingState()
 
         val mappedModel = modelBufferProvider?.invoke()
         if (mappedModel == null) {
@@ -425,12 +445,29 @@ class FrameProcessor(
             }
             val inferenceMs = (System.nanoTime() - inferenceStartNs) / 1_000_000.0
             lastInferenceMs.set(inferenceMs)
+            var bestBallBox: DetectionBox? = null
+            for (box in boxes) {
+                if (box.classId != BALL_CLASS_ID) continue
+                val currentBest = bestBallBox
+                if (currentBest == null || box.confidence > currentBest.confidence) {
+                    bestBallBox = box
+                }
+            }
+            val dtSec = trackerDeltaSeconds(imageTimestampNs)
+            val trackedBall = ballTracker.track(
+                dtSec = dtSec,
+                measurement = bestBallBox
+            )
+            latestTrackedBall.set(trackedBall.takeIf { it.isTracked })
+            latestMissStreak.set(ballTracker.missFrames)
             _detections.value = DetectionFrame(
                 timestampNs = imageTimestampNs,
                 sourceWidth = rotatedWidth,
                 sourceHeight = rotatedHeight,
                 rotationDegrees = 0,
-                boxes = boxes
+                boxes = boxes,
+                trackedBall = trackedBall,
+                missStreak = ballTracker.missFrames
             )
         } catch (error: Throwable) {
             _lastError.value = "Frame processing failed: ${error.message ?: "unknown error"}"
@@ -649,6 +686,24 @@ class FrameProcessor(
         }
     }
 
+    private fun trackerDeltaSeconds(frameTimestampNs: Long): Float {
+        val previousTimestampNs = lastTrackerTimestampNs
+        lastTrackerTimestampNs = frameTimestampNs
+        if (previousTimestampNs <= 0L || frameTimestampNs <= previousTimestampNs) {
+            return DEFAULT_TRACKER_DT_SEC
+        }
+        val deltaNs = frameTimestampNs - previousTimestampNs
+        return (deltaNs / 1_000_000_000f).coerceIn(MIN_TRACKER_DT_SEC, MAX_TRACKER_DT_SEC)
+    }
+
+    private fun resetTrackingState() {
+        ballTracker.reset()
+        latestTrackedBall.set(null)
+        latestMissStreak.set(0)
+        lastImageTimestampNs = -1L
+        lastTrackerTimestampNs = -1L
+    }
+
     private fun publishWindowStats() {
         val samples = mutableListOf<Double>()
         while (true) {
@@ -659,6 +714,7 @@ class FrameProcessor(
         val fps = samples.size
         val avg = if (samples.isEmpty()) 0.0 else samples.average()
         val p95 = calculateP95(samples)
+        val trackedBall = latestTrackedBall.get()
 
         _stats.update {
             it.copy(
@@ -670,7 +726,13 @@ class FrameProcessor(
                 lastInferenceMs = lastInferenceMs.get(),
                 delegateMode = currentMode.get(),
                 ramMb = currentProcessRamMb(),
-                thermalStatus = thermalStatusProvider()
+                thermalStatus = thermalStatusProvider(),
+                trackingActive = trackedBall?.isTracked == true,
+                trackCx = trackedBall?.centroidX?.toDouble(),
+                trackCy = trackedBall?.centroidY?.toDouble(),
+                trackVx = trackedBall?.velocityX?.toDouble(),
+                trackVy = trackedBall?.velocityY?.toDouble(),
+                missStreak = latestMissStreak.get()
             )
         }
     }
@@ -703,6 +765,10 @@ class FrameProcessor(
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.40f
         private const val NMS_IOU_THRESHOLD = 0.50f
+        private const val BALL_CLASS_ID = 0
+        private const val DEFAULT_TRACKER_DT_SEC = 1f / 30f
+        private const val MIN_TRACKER_DT_SEC = 1f / 120f
+        private const val MAX_TRACKER_DT_SEC = 0.25f
 
         private const val E2E_MAX_DETS = 300
         private const val E2E_FIELDS = 6

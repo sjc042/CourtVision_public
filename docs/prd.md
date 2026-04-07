@@ -68,24 +68,26 @@ CourtVision is an Android-native basketball performance tracking app that uses o
 
 ### 3.1 Feature Priority Table
 
-| Feature Area | Description | Priority | MVP? |
-| --- | --- | --- | --- |
-| Shot Detection & Counting | Single multi-class YOLO detector (basketball + hoop) drives release detection, make/miss classification, and shot counting per session | P0 | Yes |
-| Capture Mode: Tripod | Stationary elevated wide-angle shot with three-point line in full view | P0 | Yes |
-| Capture Mode: Ground | Stationary wide-angle; low angle; limited court context; biomechanics focus | P0 | Yes |
-| Vertical Jump Height | Estimate jump height from hip landmark displacement over time | P0 | Yes |
-| Court Heatmap | AR homography maps shot locations to standard court overlay in Tripod mode | P0 | Yes |
-| Ground Plane Detection (Manual Calibration) | ARCore detects floor plane to establish court coordinate system in Tripod mode | P0 | Yes |
-| Ground Plane Detection (Auto w/ drag calibration) | ARCore detects floor plane automatically in Tripod mode | P1 | No |
-| Shot Type Classification | Identify catch-and-shoot, pull-up, step-back, post moves | P1 | Yes |
-| Release Time | Estimate time taken to shoot the ball | P1 | Yes |
-| Release Speed | Estimate ball velocity from frame-delta of detected ball | P1 | Yes |
-| Release Angle | MediaPipe pose landmarks compute wrist/elbow angle at release | P1 | Yes |
-| Leg Angle (Knee Bend) | Detect knee flexion angle using pose estimation at shot prep | P1 | Yes |
-| Session History & Stats | Store session summaries locally; shooting % trends over time | P1 | Yes |
-| Drill Mode | Guided shooting drills with targets (e.g., corner 3s only) | P2 | No |
-| Share / Export | Export heatmap image and session stats as PDF or share card | P2 | No |
-| Freemium Paywall | Core tracking free; advanced analytics, drill history behind paywall | P1 | Yes |
+> **MVP scope:** See Section 3.2 for the canonical Must Ship / Deferred definition.
+
+| Feature Area | Description | Priority |
+| --- | --- | --- |
+| Shot Detection & Counting | Single multi-class YOLO detector (basketball + hoop) drives release detection, make/miss classification, and shot counting per session | P0 |
+| Capture Mode: Tripod | Stationary elevated wide-angle shot with three-point line in full view | P0 |
+| Capture Mode: Ground | Stationary wide-angle; low angle; limited court context; biomechanics focus | P0 |
+| Vertical Jump Height | Estimate jump height from hip landmark displacement over time | P0 |
+| Court Heatmap | AR homography maps shot locations to standard court overlay in Tripod mode | P0 |
+| Ground Plane Detection (Manual Calibration) | ARCore detects floor plane to establish court coordinate system in Tripod mode | P0 |
+| Ground Plane Detection (Auto w/ drag calibration) | ARCore detects floor plane automatically in Tripod mode | P1 |
+| Shot Type Classification | Identify catch-and-shoot, pull-up, step-back, post moves | P1 |
+| Release Time | Estimate time taken to shoot the ball | P1 |
+| Release Speed | Estimate ball velocity from frame-delta of detected ball | P1 |
+| Release Angle | MediaPipe pose landmarks compute wrist/elbow angle at release | P1 |
+| Leg Angle (Knee Bend) | Detect knee flexion angle using pose estimation at shot prep | P1 |
+| Session History & Stats | Store session summaries locally; shooting % trends over time | P1 |
+| Drill Mode | Guided shooting drills with targets (e.g., corner 3s only) | P2 |
+| Share / Export | Export heatmap image and session stats as PDF or share card | P2 |
+| Freemium Paywall | Core tracking free; advanced analytics, drill history behind paywall | P1 |
 
 ### 3.2 MVP v1 Scope (Must Ship vs Deferred)
 

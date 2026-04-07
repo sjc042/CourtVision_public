@@ -12,6 +12,8 @@ interface FrameProcessorGateway {
 
     fun submitImage(image: ImageProxy)
     fun setInferenceMode(mode: InferenceMode)
+    fun setTrackerMaxMissFrames(maxMissFrames: Int)
+    fun setTrackerNoise(processNoise: Float, measurementNoise: Float)
     fun updateExpectedRotation(
         expectedTargetRotation: Int,
         expectedFrameRotationDegrees: Int,

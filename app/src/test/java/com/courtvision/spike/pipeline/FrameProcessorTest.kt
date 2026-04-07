@@ -6,10 +6,12 @@ import androidx.camera.core.ImageInfo
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.impl.TagBundle
 import androidx.camera.core.impl.utils.ExifData
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -178,6 +180,88 @@ class FrameProcessorTest {
 
             assertFalse(image.isClosed)
             assertEquals(1, processor.stats.value.queueDepth)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun trackerMaxMissFrames_isForwarded() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            processor.setTrackerMaxMissFrames(17)
+            testScheduler.runCurrent()
+
+            val trackerField = FrameProcessor::class.java.getDeclaredField("ballTracker")
+            trackerField.isAccessible = true
+            val tracker = trackerField.get(processor) as KalmanBallTracker
+
+            assertEquals(17, tracker.maxMissFrames)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun stats_includeTrackingSnapshotFields() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            val trackedBall = TrackedBall(
+                centroidX = 0.42f,
+                centroidY = 0.61f,
+                velocityX = 0.13f,
+                velocityY = -0.08f,
+                isTracked = true,
+                rawBox = null
+            )
+
+            val trackedField = FrameProcessor::class.java.getDeclaredField("latestTrackedBall")
+            trackedField.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val trackedRef = trackedField.get(processor) as java.util.concurrent.atomic.AtomicReference<TrackedBall?>
+            trackedRef.set(trackedBall)
+
+            val missField = FrameProcessor::class.java.getDeclaredField("latestMissStreak")
+            missField.isAccessible = true
+            val missRef = missField.get(processor) as AtomicInteger
+            missRef.set(4)
+
+            processor.publishWindowStatsForTest()
+            val stats = processor.stats.value
+
+            assertTrue(stats.trackingActive)
+            assertEquals(0.42, stats.trackCx ?: -1.0, 0.0001)
+            assertEquals(0.61, stats.trackCy ?: -1.0, 0.0001)
+            assertEquals(0.13, stats.trackVx ?: -1.0, 0.0001)
+            assertEquals(-0.08, stats.trackVy ?: -1.0, 0.0001)
+            assertEquals(4, stats.missStreak)
+            assertNotNull(stats.trackCx)
+            assertNotNull(stats.trackCy)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun resetInterpreter_clearsLastImageTimestampNs() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            val lastImageTimestampField =
+                FrameProcessor::class.java.getDeclaredField("lastImageTimestampNs")
+            lastImageTimestampField.isAccessible = true
+            lastImageTimestampField.setLong(processor, 123_456_789L)
+
+            processor.resetInterpreter()
+            testScheduler.runCurrent()
+
+            val updated = lastImageTimestampField.getLong(processor)
+            assertEquals(-1L, updated)
         } finally {
             processor.shutdown()
         }

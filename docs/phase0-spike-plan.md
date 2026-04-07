@@ -32,12 +32,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 
 ## 📱 Target Hardware Baseline
 
-| Tier | Device |
-| --- | --- |
-| **Primary testing device** | Samsung Galaxy S22+ |
-| **Mid-range (cross-check)** | Pixel 6 or Samsung Galaxy A54 |
-| **Low-end (stretch validation)** | Samsung Galaxy A32 |
-| **High-end (ceiling check)** | Samsung Galaxy S23 |
+> See [TDD §9.3](../docs/tdd.md#93-device-testing-matrix) for the canonical device gate matrix.
 
 ---
 
@@ -161,7 +156,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 
 ### 4) Test Conditions (Must Be Reproducible)
 
-- Devices: Pixel 6 (primary), Galaxy A54 (mid-range cross-check), Galaxy A32 (low-end stretch)
+- Devices: Samsung Galaxy S22+ (primary), Pixel 6 or Pixel 7 (mid-range cross-check), Xiaomi Redmi Note 12 or Galaxy A32 (low-end stretch)
 - Resolution/FPS: 720p input, 30fps target
 - Runtime protocol: 2-min warm-up + 10-min measured window
 - Per-condition runs: minimum 3 runs per device per mode

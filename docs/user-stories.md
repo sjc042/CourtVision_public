@@ -34,27 +34,29 @@ Version 1.0 | Planning Stage | March 2026
 
 ## P0/P1 Delivery Plan (Story Points + Owner + Target Sprint)
 
-| Story | Priority | Story Points | Owner | Target Sprint |
-| --- | --- | --- | --- | --- |
-| US-01 First-Time Onboarding | P0 | 3 | Product/UX + Android | Sprint 1 |
-| US-02 Tripod Mode Setup | P0 | 2 | Android Capture | Sprint 1 |
-| US-03 Ground Mode Setup | P0 | 3 | Android Capture | Sprint 1 |
-| US-04 Tripod Court Calibration | P0 | 5 | AR/CV | Sprint 2 |
-| US-05 Auto Shot Detection | P0 | 8 | ML/CV | Sprint 2 |
-| US-09 ARCore Floor Detection | P0 | 8 | AR/CV | Sprint 3 |
-| US-06 Shot Type Classification | P1 | 8 | ML/CV | Sprint 6 |
-| US-07 Live Session Counter | P1 | 3 | Android Capture | Sprint 3 |
-| US-08 Manual Shot Correction | P1 | 3 | Android + Data | Sprint 4 |
-| US-10 Shot Heatmap View | P1 | 5 | AR/CV + Analytics | Sprint 5 |
-| US-11 Heatmap Filters | P1 | 3 | Analytics/UI | Sprint 5 |
-| US-13 Release Speed | P1 | 5 | ML/CV | Sprint 4 |
-| US-14 Release Angle | P1 | 3 | ML/CV | Sprint 4 |
-| US-15 Knee Flexion Feedback | P1 | 3 | ML/CV | Sprint 4 |
-| US-16 Metrics in Both Modes | P1 | 2 | ML/CV + QA | Sprint 4 |
-| US-18 Auto Session Save | P1 | 5 | Data/Android | Sprint 5 |
-| US-19 Shooting Trend Chart | P1 | 3 | Analytics/UI | Sprint 6 |
-| US-20 Shot-by-Shot Session Review | P1 | 5 | Android + Data | Sprint 6 |
-| US-24 Freemium Upgrade Prompt | P1 | 5 | Monetization + Android | Sprint 6 |
+> **MVP?** column references `docs/prd.md` Section 3.2 (Must Ship / Deferred table) as the canonical definition.
+
+| Story | Priority | Story Points | Owner | Target Sprint | MVP? |
+| --- | --- | --- | --- | --- | --- |
+| US-01 First-Time Onboarding | P0 | 3 | Product/UX + Android | Sprint 1 | Yes |
+| US-02 Tripod Mode Setup | P0 | 2 | Android Capture | Sprint 1 | Yes |
+| US-03 Ground Mode Setup | P0 | 3 | Android Capture | Sprint 1 | Yes |
+| US-04 Tripod Court Calibration | P0 | 5 | AR/CV | Sprint 2 | Yes |
+| US-05 Auto Shot Detection | P0 | 8 | ML/CV | Sprint 2 | Yes |
+| US-09 ARCore Floor Detection | P0 | 8 | AR/CV | Sprint 3 | Yes |
+| US-06 Shot Type Classification | P1 | 8 | ML/CV | Sprint 6 | No |
+| US-07 Live Session Counter | P1 | 3 | Android Capture | Sprint 3 | Yes |
+| US-08 Manual Shot Correction | P1 | 3 | Android + Data | Sprint 4 | Yes |
+| US-10 Shot Heatmap View | P1 | 5 | AR/CV + Analytics | Sprint 5 | Yes |
+| US-11 Heatmap Filters | P1 | 3 | Analytics/UI | Sprint 5 | Yes |
+| US-13 Release Speed | P1 | 5 | ML/CV | Sprint 4 | Yes |
+| US-14 Release Angle | P1 | 3 | ML/CV | Sprint 4 | Yes |
+| US-15 Knee Flexion Feedback | P1 | 3 | ML/CV | Sprint 4 | Yes |
+| US-16 Metrics in Both Modes | P1 | 2 | ML/CV + QA | Sprint 4 | Yes |
+| US-18 Auto Session Save | P1 | 5 | Data/Android | Sprint 5 | Yes |
+| US-19 Shooting Trend Chart | P1 | 3 | Analytics/UI | Sprint 6 | Yes |
+| US-20 Shot-by-Shot Session Review | P1 | 5 | Android + Data | Sprint 6 | Yes |
+| US-24 Freemium Upgrade Prompt | P1 | 5 | Monetization + Android | Sprint 6 | No |
 
 ## EPIC-1: Onboarding & Capture Setup
 
@@ -162,7 +164,7 @@ Version 1.0 | Planning Stage | March 2026
 | --- | --- |
 | Priority | P1 |
 | Story Points | 8 |
-| MVP | Yes |
+| MVP | No |
 
 **Acceptance Criteria**
 
@@ -429,7 +431,7 @@ Version 1.0 | Planning Stage | March 2026
 | --- | --- |
 | Priority | P1 |
 | Story Points | 5 |
-| MVP | Yes |
+| MVP | No |
 
 ---
 

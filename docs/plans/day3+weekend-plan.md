@@ -153,22 +153,23 @@ inference loop for Day 4+ testing.
 - Final class indices in `data.yaml`: `0=ball`, `1=made`, `2=person`, `3=rim`, `4=shoot`
 
 ### Step 3 — Training ✅ (YOLOv8n) / 🔲 (remaining)
+#### Training Results (50 epochs each)
+| Model | Input Size | mAP50 | mAP50-95 | Notes |
+|-------|-----------|-------|----------|-------|
+| yolov8n | 640x640 | 0.94006 | 0.73543 | |
+| yolov8n | 480x480 | 0.93476 | 0.72150 | |
+| yolov8n | 320x320 | 0.89546 | 0.66649 | |
+| yolo11n | 640x640 | 0.93473 | 0.74061 | |
+| yolo11n | 480x480 | 0.93375 | 0.73111 | |
+| yolo11n | 320x320 | 0.90842 | 0.67137 | |
+| yolov8s | 640×640 | 0.94244 | 0.76115 | |
 
-**YOLOv8n** — completed at 3 resolutions, 50 epochs each:
+### Remaining Training
 
-| Input Size | mAP50 | mAP50-95 |
-|-----------|-------|----------|
-| 640x640 | 0.94006 | 0.73543 |
-| 480x480 | 0.93476 | 0.72150 |
-| 320x320 | 0.89546 | 0.66649 |
-
-**Remaining training matrix:**
-
-| Model | 640 | 480 | 320 |
-|-------|-----|-----|-----|
-| yolov8s | 🔲 | 🔲 | 🔲 |
-| yolov11n | 🔲 | 🔲 | 🔲 |
-| yolov11s | 🔲 | 🔲 | 🔲 |
+| Model | Input Size | Status |
+|-------|-----------|--------|
+| yolov8s | 640 / 480 / 320 | Pending |
+| yolov11s | 640 / 480 / 320 | Pending | 
 
 Settings: Mixed precision, no dropout, default YOLO augmentation, cosine LR (50 epochs sufficient for convergence).
 

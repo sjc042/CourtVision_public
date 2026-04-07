@@ -17,6 +17,8 @@ import com.courtvision.spike.pipeline.PerformanceCsvLogger
 import com.courtvision.spike.pipeline.PerformanceLogger
 import com.courtvision.spike.pipeline.RotationTelemetry
 import com.courtvision.spike.pipeline.SpikeImageAnalyzer
+import com.courtvision.spike.pipeline.TrackingCsvLogger
+import com.courtvision.spike.pipeline.TrackingLogger
 import java.io.FileInputStream
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
@@ -46,12 +48,15 @@ class CameraViewModel(
         )
     private val performanceLogger: PerformanceLogger =
         overrides?.performanceLogger ?: PerformanceCsvLogger(application)
+    private val trackingLogger: TrackingLogger =
+        overrides?.trackingLogger ?: TrackingCsvLogger(application)
 
     private val _uiState = MutableStateFlow(
         CameraUiState(
             availableModels = availableModelPaths,
             selectedModel = selectedModelPath,
-            logFilePath = performanceLogger.filePath
+            logFilePath = performanceLogger.filePath,
+            trackingLogFilePath = trackingLogger.filePath
         )
     )
     private val analyzer = SpikeImageAnalyzer(frameProcessor) {
@@ -75,6 +80,11 @@ class CameraViewModel(
                 nnApiAvailable = nnApiResult.startsWith("NNAPI_AVAILABLE")
             )
         }
+        frameProcessor.setTrackerMaxMissFrames(_uiState.value.trackerMaxMissFrames)
+        frameProcessor.setTrackerNoise(
+            _uiState.value.trackerProcessNoise,
+            _uiState.value.trackerMeasurementNoise
+        )
 
         viewModelScope.launch {
             frameProcessor.stats.collect { stats ->
@@ -94,12 +104,20 @@ class CameraViewModel(
 
         viewModelScope.launch {
             frameProcessor.detections.collect { frame ->
+                val isModelConfirmed = _uiState.value.modelConfirmed
                 _uiState.update { state ->
-                    if (state.modelConfirmed) {
+                    if (isModelConfirmed) {
                         state.copy(detectionFrame = frame)
                     } else {
                         state.copy(detectionFrame = DetectionFrame())
                     }
+                }
+                if (isModelConfirmed) {
+                    trackingLogger.append(
+                        frame = frame,
+                        delegateMode = _uiState.value.selectedMode,
+                        modelUsed = selectedModelPath
+                    )
                 }
             }
         }
@@ -177,6 +195,22 @@ class CameraViewModel(
         }
     }
 
+    fun setTrackerMaxMissFrames(value: Int) {
+        val normalized = value.coerceIn(1, 30)
+        frameProcessor.setTrackerMaxMissFrames(normalized)
+        _uiState.update { it.copy(trackerMaxMissFrames = normalized) }
+    }
+
+    fun setTrackerNoise(processNoise: Float, measurementNoise: Float) {
+        frameProcessor.setTrackerNoise(processNoise, measurementNoise)
+        _uiState.update {
+            it.copy(
+                trackerProcessNoise = processNoise,
+                trackerMeasurementNoise = measurementNoise
+            )
+        }
+    }
+
     fun updateExpectedRotation(
         expectedTargetRotation: Int,
         expectedFrameRotationDegrees: Int,
@@ -233,6 +267,8 @@ class CameraViewModel(
     }
 
     override fun onCleared() {
+        performanceLogger.close()
+        trackingLogger.close()
         frameProcessor.shutdown()
         super.onCleared()
     }
@@ -331,6 +367,7 @@ class CameraViewModel(
     internal data class TestOverrides(
         val frameProcessor: FrameProcessorGateway? = null,
         val performanceLogger: PerformanceLogger? = null,
+        val trackingLogger: TrackingLogger? = null,
         val modelPaths: List<String>? = null,
         val initialModelPath: String? = null,
         val gpuProbeResult: GpuProbeResult? = null,

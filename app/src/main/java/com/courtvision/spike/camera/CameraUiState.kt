@@ -22,9 +22,13 @@ data class CameraUiState(
     val availableModels: List<String> = emptyList(),
     val selectedModel: String = "",
     val modelConfirmed: Boolean = false,
+    val trackerMaxMissFrames: Int = 10,
+    val trackerProcessNoise: Float = 1e-2f,
+    val trackerMeasurementNoise: Float = 1e-5f,
     val selectedMode: InferenceMode = InferenceMode.CPU,
     val isSwitchingMode: Boolean = false,
     val detectionFrame: DetectionFrame = DetectionFrame(),
     val logFilePath: String = "",
+    val trackingLogFilePath: String = "",
     val lastError: String? = null
 )

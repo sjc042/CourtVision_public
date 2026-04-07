@@ -12,8 +12,8 @@ Issues are tracked on GitHub: [sjc042/Court-Vision Issues](https://github.com/sj
 | [#1](https://github.com/sjc042/Court-Vision/issues/1) | Fix double-counted drop counter in FrameProcessor | Critical | Day 3 | ISSUE-001 | ✅ Fixed (`4ab53f0`) |
 | [#2](https://github.com/sjc042/Court-Vision/issues/2) | Add Phase 0 single-module override to CONTEXT.md | Critical | Day 3 | ISSUE-002 | ✅ Fixed (`de3490c`) |
 | [#3](https://github.com/sjc042/Court-Vision/issues/3) | Define frame scheduling strategy for combined pipeline | Critical | Day 5 | ISSUE-003 + Day1 #4 | ✅ Spec written (`de3490c`) |
-| [#4](https://github.com/sjc042/Court-Vision/issues/4) | Consolidate MVP scope to single canonical definition | High | Day 5 | ISSUE-004 + Day1 #2 | Open |
-| [#5](https://github.com/sjc042/Court-Vision/issues/5) | Update TDD to reflect ADR-001 and remove stale references | High | Day 5 | ISSUE-005 + Day1 #1 | Open |
+| [#4](https://github.com/sjc042/Court-Vision/issues/4) | Consolidate MVP scope to single canonical definition | High | Day 5 | ISSUE-004 + Day1 #2 | ✅ Fixed |
+| [#5](https://github.com/sjc042/Court-Vision/issues/5) | Update TDD to reflect ADR-001 and remove stale references | High | Day 5 | ISSUE-005 + Day1 #1 | ✅ Fixed |
 | [#6](https://github.com/sjc042/Court-Vision/issues/6) | Add acceptance criteria for US-13 through US-18 | High | Day 5 | ISSUE-006 + Day1 #6 | Open |
 | [#7](https://github.com/sjc042/Court-Vision/issues/7) | Unify device test matrix across all docs | Medium | Day 5 | Day1 #5 | Open |
 | [#8](https://github.com/sjc042/Court-Vision/issues/8) | Add FSM transition threshold table to TDD | Medium | Phase 2 | ISSUE-007 | Open |

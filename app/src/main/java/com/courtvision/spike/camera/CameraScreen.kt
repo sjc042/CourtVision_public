@@ -33,7 +33,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -63,6 +65,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -109,6 +114,8 @@ fun CameraScreen(
         MetricsOverlay(
             uiState = uiState,
             onModeSelect = viewModel::setInferenceMode,
+            onTrackerMissFramesChanged = viewModel::setTrackerMaxMissFrames,
+            onTrackerNoiseChanged = viewModel::setTrackerNoise,
             onModelSelect = viewModel::setModel,
             onConfirmModel = viewModel::confirmModel,
             onRestartSession = viewModel::restartSession
@@ -303,13 +310,21 @@ private fun DetectionOverlay(
             style = Paint.Style.FILL
         }
     }
+    val trackerTextPaint = remember {
+        Paint().apply {
+            color = android.graphics.Color.CYAN
+            textSize = 34f
+            isAntiAlias = true
+            style = Paint.Style.FILL
+        }
+    }
 
     Canvas(modifier = modifier) {
         val canvasW = size.width
         val canvasH = size.height
 
         // FrameProcessor pre-applies rotation via Rot90Op before inference, so sourceWidth/Height
-        // are already in display orientation (e.g. portrait: 720×1280). rotationDegrees is always 0.
+        // are already in display orientation (e.g. portrait: 720Ã—1280). rotationDegrees is always 0.
         val effectiveSrcW = detectionFrame.sourceWidth.toFloat()
         val effectiveSrcH = detectionFrame.sourceHeight.toFloat()
 
@@ -333,11 +348,11 @@ private fun DetectionOverlay(
             val bottom = displayBox.bottom * scaledH - offsetY
 
             val boxColor = when (displayBox.classId) {
-                0 -> Color(0xFFFF6F00)  // ball → orange
-                1 -> Color(0xFF43A047)  // made → green
-                2 -> Color(0xFF1E88E5)  // person → blue
-                3 -> Color(0xFFFFD600)  // rim → yellow
-                4 -> Color(0xFFAB47BC)  // shoot → purple
+                0 -> Color(0xFFFF6F00)  // ball â†’ orange
+                1 -> Color(0xFF43A047)  // made â†’ green
+                2 -> Color(0xFF1E88E5)  // person â†’ blue
+                3 -> Color(0xFFFFD600)  // rim â†’ yellow
+                4 -> Color(0xFFAB47BC)  // shoot â†’ purple
                 else -> Color(0xFFFFFFFF)
             }
 
@@ -358,6 +373,33 @@ private fun DetectionOverlay(
                 textPaint
             )
         }
+
+        val trackedBall = detectionFrame.trackedBall
+        if (trackedBall?.isTracked == true) {
+            val centerX = trackedBall.centroidX * scaledW - offsetX
+            val centerY = trackedBall.centroidY * scaledH - offsetY
+            val vectorSeconds = 0.15f
+            val endX = (trackedBall.centroidX + trackedBall.velocityX * vectorSeconds) * scaledW - offsetX
+            val endY = (trackedBall.centroidY + trackedBall.velocityY * vectorSeconds) * scaledH - offsetY
+
+            drawCircle(
+                color = Color.Cyan,
+                radius = 6.dp.toPx(),
+                center = Offset(centerX, centerY)
+            )
+            drawLine(
+                color = Color.Cyan,
+                start = Offset(centerX, centerY),
+                end = Offset(endX, endY),
+                strokeWidth = 2.dp.toPx()
+            )
+            drawContext.canvas.nativeCanvas.drawText(
+                "T",
+                (centerX + 8f).coerceAtMost(canvasW - 24f),
+                (centerY - 8f).coerceAtLeast(32f),
+                trackerTextPaint
+            )
+        }
     }
 }
 
@@ -365,6 +407,8 @@ private fun DetectionOverlay(
 private fun MetricsOverlay(
     uiState: CameraUiState,
     onModeSelect: (InferenceMode) -> Unit,
+    onTrackerMissFramesChanged: (Int) -> Unit,
+    onTrackerNoiseChanged: (Float, Float) -> Unit,
     onModelSelect: (String) -> Unit,
     onConfirmModel: () -> Unit,
     onRestartSession: () -> Unit
@@ -438,6 +482,43 @@ private fun MetricsOverlay(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        Text(
+            "Track CSV: ${uiState.trackingLogFilePath}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        
+        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = Color.White.copy(alpha = 0.2f))
+        Text("Tracker Tuning", color = Color.Cyan, style = MaterialTheme.typography.titleSmall)
+
+        Text(
+            "Miss reset: ${uiState.trackerMaxMissFrames} frames",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Slider(
+            value = uiState.trackerMaxMissFrames.toFloat(),
+            onValueChange = { onTrackerMissFramesChanged(it.roundToInt()) },
+            valueRange = 1f..30f,
+            steps = 28
+        )
+
+        LogarithmicNoiseSlider(
+            label = "Process Noise",
+            value = uiState.trackerProcessNoise,
+            onValueChange = { onTrackerNoiseChanged(it, uiState.trackerMeasurementNoise) }
+        )
+
+        LogarithmicNoiseSlider(
+            label = "Measurement Noise",
+            value = uiState.trackerMeasurementNoise,
+            onValueChange = { onTrackerNoiseChanged(uiState.trackerProcessNoise, it) }
+        )
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = Color.White.copy(alpha = 0.2f))
+
         if (uiState.isSwitchingMode) {
             Text(
                 "Switching delegate mode...",
@@ -451,7 +532,7 @@ private fun MetricsOverlay(
         }
         InferenceModeSelector(
             selectedMode = uiState.selectedMode,
-            nnApiAvailable = uiState.nnApiAvailable,
+            nnapiAvailable = uiState.nnApiAvailable,
             onModeSelect = onModeSelect
         )
         ModelSelector(
@@ -467,9 +548,33 @@ private fun MetricsOverlay(
 }
 
 @Composable
+private fun LogarithmicNoiseSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit
+) {
+    // Noise values usually range from 1e-6 to 1e-1.
+    // We'll use log10 for the slider to make it usable across decades.
+    val logValue = remember(value) { log10(value.toDouble()).toFloat().coerceIn(-6f, -1f) }
+
+    Column {
+        Text(
+            text = "$label: ${"%.1e".format(value)}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Slider(
+            value = logValue,
+            onValueChange = { onValueChange(10f.pow(it)) },
+            valueRange = -6f..-1f
+        )
+    }
+}
+
+@Composable
 private fun InferenceModeSelector(
     selectedMode: InferenceMode,
-    nnApiAvailable: Boolean,
+    nnapiAvailable: Boolean,
     onModeSelect: (InferenceMode) -> Unit
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -486,7 +591,7 @@ private fun InferenceModeSelector(
         ModeButton(
             label = "NNAPI",
             selected = selectedMode == InferenceMode.NNAPI,
-            enabled = nnApiAvailable,
+            enabled = nnapiAvailable,
             onClick = { onModeSelect(InferenceMode.NNAPI) }
         )
     }
