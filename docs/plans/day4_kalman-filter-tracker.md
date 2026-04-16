@@ -1,5 +1,7 @@
 # Plan: Day 4 — Kalman Ball Tracker
 
+**Status:** ✅ COMPLETED (2026-04-02) — all 10 tasks done.
+
 ## Context
 
 Days 1–3 are complete. The pipeline is:
@@ -17,12 +19,14 @@ Day 4 also has a **pre-task block** (export custom-trained model + validate on d
 
 ---
 
-## Pre-Day-4 Checklist (user runs these)
+## Pre-Day-4 Checklist (user runs these), Non-Blocking
 
 These are TASKS.md blockers left over from the weekend training track:
-1. Export best yolov8n (640) custom model to TFLite FP16 → drop into `assets/`
-2. Run existing Day 3 benchmark loop with custom model, confirm detection quality on-device
-3. Update TASKS.md training matrix status once yolov8s / yolo11n / yolo11s training completes
+1. ✅ Export best yolov8n (640) custom model to TFLite FP16 → drop into `assets/`
+2. 🔲 Complete remaining training matrix (yolov8s, yolov11n, yolov11s at 3 resolutions) — still pending
+3. 🔲 Export best model(s) from remaining training to TFLite FP16 → drop into `assets/`
+4. ✅ Run Day 3 benchmark loop with custom-trained model; validate detection quality on-device
+5. 🔲 Update TASKS.md training matrix status once remaining training completes
 
 The Kalman code can be written while these are in progress — it consumes `DetectionBox` output regardless of model.
 
@@ -244,9 +248,10 @@ Add corresponding fields to `PipelineStats` (or pass `TrackedBall?` directly to 
 
 ---
 
-### Step 7 — `ADR-004`: Document Kalman Design
+### Step 7 — `ADR-004`: Document Kalman Design ✅
 
 Write `docs/decisions/004-kalman-ball-tracker.md` covering:
+> Note: TASKS.md item 8 incorrectly references this as `003-kalman-ball-tracker.md` (ADR-003). The actual file is `004-kalman-ball-tracker.md` (ADR-004). ADR-003 is `003-rotation-source-of-truth.md`.
 - Motion model choice (constant velocity, why not acceleration)
 - Coordinate space choice (normalized [0,1])
 - Dependency decision (pure Kotlin vs EJML)
@@ -256,9 +261,9 @@ Write `docs/decisions/004-kalman-ball-tracker.md` covering:
 
 ---
 
-### Step 8 — Update `TASKS.md` and `CONTEXT.md`
+### Step 8 — Update `TASKS.md` and `CONTEXT.md` ✅
 
-Mark Day 4 active in both files. Add pre-checklist items as explicit TASKS.md tasks. Update CONTEXT.md progress line to: *"Day 4 (Kalman tracker) in progress."*
+Marked Day 4 active in TASKS.md. Updated CONTEXT.md progress line to: *"Day 4 (Kalman tracker) in progress - implementation underway (core tracking + dual CSV logging integrated)."*
 
 ---
 
@@ -289,3 +294,24 @@ Write `KalmanBallTrackerTest` in `app/src/test/` covering:
 - Update reduces uncertainty (P shrinks on diagonal)
 - Miss-frame counter triggers reset at exactly `maxMissFrames`
 - Centroid smoothing: step-change measurement → tracker lags, not jumps
+
+---
+
+## Post-Day-4 Addition — NNAPI Delegate Mode (2026-04-01)
+
+Not in original Day 4 scope. Added as an extension to the GPU/CPU delegate switching infrastructure built in Day 3.
+
+1. Added `InferenceMode.NNAPI` with runtime switching and CPU fallback on delegate init failure
+2. Added `NnApiDelegateProbe` — probed synchronously in `CameraViewModel.init`
+3. Added NNAPI probe visibility in debug overlay and mode selector gating
+4. Added unit tests covering NNAPI probe state and CSV serialization of `delegate_mode=NNAPI`
+5. Phase 2 note: move both GPU and NNAPI delegate probes to `Dispatchers.Default`
+
+> **Architecture note:** `InferenceMode.NNAPI` routes through Android's NNAPI HAL and does **not** access the Hexagon NPU on Qualcomm devices. NPU acceleration requires the QNN TFLite delegate — a Phase 2 dependency. See [ADR-005 Deferred section](../decisions/005-sequential-gpu-inference-pipeline.md).
+
+---
+
+## Completion Record
+
+All 10 Day 4 tasks completed and committed by 2026-04-02. Branch: `spike/day4-kalman-tracker`.
+On-device validation passed: 10-shot sequence CSV confirmed smooth trajectories with no single-frame spikes.

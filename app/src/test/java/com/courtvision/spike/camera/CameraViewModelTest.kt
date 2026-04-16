@@ -13,11 +13,15 @@ import com.courtvision.spike.pipeline.GpuStatus
 import com.courtvision.spike.pipeline.InferenceMode
 import com.courtvision.spike.pipeline.PerformanceLogger
 import com.courtvision.spike.pipeline.PipelineStats
+import com.courtvision.spike.pipeline.PoseFrameResult
 import com.courtvision.spike.pipeline.RotationTelemetry
 import com.courtvision.spike.pipeline.TrackingLogger
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -222,6 +226,62 @@ class CameraViewModelTest {
         assertTrue(fakeTrackingLogger.closed)
     }
 
+    @Test
+    fun startDay5PoseIsolatedValidation_emptySelection_setsFailureStatus() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE,
+            poseOutputRootProvider = { File(System.getProperty("java.io.tmpdir"), "cv-pose-test") }
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            viewModel.confirmModel()
+            viewModel.startDay5PoseIsolatedValidation(emptyList())
+
+            assertEquals(0, fakeProcessor.submitPoseValidationBatchCalls)
+            assertEquals("FAILED: no images selected", viewModel.uiState.value.poseValidationStatus)
+        } finally {
+            handle.store.clear()
+        }
+    }
+
+    @Test
+    fun startDay5PoseIsolatedValidation_withoutModelConfirmation_setsFailureStatus() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE,
+            poseOutputRootProvider = { File(System.getProperty("java.io.tmpdir"), "cv-pose-test") }
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            viewModel.startDay5PoseIsolatedValidation(emptyList())
+
+            assertEquals(0, fakeProcessor.submitPoseValidationBatchCalls)
+            assertEquals(
+                "FAILED: start inference first",
+                viewModel.uiState.value.poseValidationStatus
+            )
+        } finally {
+            handle.store.clear()
+        }
+    }
+
     private fun createViewModel(): ViewModelHandle {
         val store = ViewModelStore()
         val factory = object : ViewModelProvider.Factory {
@@ -270,21 +330,28 @@ class CameraViewModelTest {
         private val switchingFlow = MutableStateFlow(false)
         private val errorFlow = MutableStateFlow<String?>(null)
         private val rotationTelemetryFlow = MutableStateFlow(RotationTelemetry())
+        private val poseValidationResultFlow: Flow<PoseFrameResult> = emptyFlow()
 
         var resetInterpreterCalls: Int = 0
         var lastSetMode: InferenceMode? = null
         var lastSetMaxMissFrames: Int = 10
         var lastProcessNoise: Float = 0f
         var lastMeasurementNoise: Float = 0f
+        var submitPoseValidationBatchCalls: Int = 0
 
         override val stats: StateFlow<PipelineStats> = statsFlow
         override val detections: StateFlow<DetectionFrame> = detectionsFlow
         override val isSwitchingMode: StateFlow<Boolean> = switchingFlow
         override val lastError: StateFlow<String?> = errorFlow
         override val rotationTelemetry: StateFlow<RotationTelemetry> = rotationTelemetryFlow
+        override val poseValidationResults: Flow<PoseFrameResult> = poseValidationResultFlow
 
         override fun submitImage(image: ImageProxy) {
             image.close()
+        }
+
+        override fun submitPoseValidationBatch(bitmaps: List<android.graphics.Bitmap>) {
+            submitPoseValidationBatchCalls += 1
         }
 
         override fun setInferenceMode(mode: InferenceMode) {

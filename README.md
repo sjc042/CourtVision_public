@@ -1,4 +1,4 @@
-# CourtVision Spike (Day 1-2)
+# CourtVision Spike (Phase 0)
 
 Minimal Android spike app for CameraX pipeline validation before YOLO integration.
 
@@ -24,6 +24,27 @@ Minimal Android spike app for CameraX pipeline validation before YOLO integratio
 - CSV performance logging (1-second aggregates) at:
   - `sdcard/Android/data/com.courtvision.spike/files/benchmarks/phase0-day1-day2-<timestamp>.csv`
   - fallback: `files/benchmarks/phase0-day1-day2-<timestamp>.csv` if external files dir is unavailable
+
+## Model Assets Setup
+
+`pose_landmarks_detector.tflite` is not checked into the repo. Extract it from the MediaPipe
+`.task` bundle once per machine before building:
+
+```bash
+# 1. Download the lite variant (~4 MB FP16)
+curl -L -o pose_landmarker_lite.task \
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+
+# 2. Extract the raw TFLite model
+cp pose_landmarker_lite.task pose_landmarker_lite.zip
+unzip pose_landmarker_lite.zip -d pose_task_extracted/
+cp pose_task_extracted/pose_landmarks_detector.tflite \
+   app/src/main/assets/pose_landmarks_detector.tflite
+```
+
+Expected file size: ~4 MB. If the build fails with a missing asset error, re-run this step.
+See [ADR-005](docs/decisions/005-sequential-gpu-inference-pipeline.md) for why the raw `.tflite`
+is used instead of the `PoseLandmarker` Task API.
 
 ## Open in Android Studio
 

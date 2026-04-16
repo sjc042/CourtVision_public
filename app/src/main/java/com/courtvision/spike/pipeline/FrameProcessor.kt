@@ -6,6 +6,7 @@ import android.os.SystemClock
 import androidx.camera.core.ImageProxy
 import java.nio.MappedByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -18,9 +19,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
@@ -41,6 +44,7 @@ enum class ModelOutputFormat { RAW_8400, END_TO_END_300 }
 class FrameProcessor(
     private val scope: CoroutineScope,
     private val modelBufferProvider: (() -> MappedByteBuffer)? = null,
+    private val poseModelBufferProvider: (() -> MappedByteBuffer)? = null,
     private val consumerDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
     private val thermalStatusProvider: () -> String = { "UNKNOWN" }
 ) : FrameConsumer, FrameProcessorGateway {
@@ -77,6 +81,11 @@ class FrameProcessor(
 
     private val _rotationTelemetry = MutableStateFlow(RotationTelemetry())
     override val rotationTelemetry: StateFlow<RotationTelemetry> = _rotationTelemetry.asStateFlow()
+    private val poseValidationQueue = ConcurrentLinkedQueue<PoseValidationEntry>()
+    private val poseValidationActive = AtomicBoolean(false)
+    private val poseValidationComplete = AtomicBoolean(false)
+    private val poseValidationResultChannel = Channel<PoseFrameResult>(Channel.UNLIMITED)
+    override val poseValidationResults: Flow<PoseFrameResult> = poseValidationResultChannel.receiveAsFlow()
 
     // Rot90Op takes counter-clockwise 90° rotation count.
     // CameraX rotationDegrees is clockwise, so:
@@ -106,6 +115,7 @@ class FrameProcessor(
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
+    private var poseInterpreter: PoseLandmarkInterpreter? = null
 
     private val frameChannel = Channel<FrameTask>(
         capacity = 1,
@@ -153,6 +163,10 @@ class FrameProcessor(
     }
 
     override fun submitImage(image: ImageProxy) {
+        if (poseValidationComplete.get()) {
+            image.close()
+            return
+        }
         if (frameChannel.isClosedForSend) {
             image.close()
             return
@@ -228,6 +242,9 @@ class FrameProcessor(
     override fun resetInterpreter() {
         scope.launch(consumerDispatcher) {
             resetTrackingState()
+            clearPoseValidationQueue(recycleBitmaps = true)
+            poseValidationActive.set(false)
+            poseValidationComplete.set(false)
             closeInterpreterResources()
         }
     }
@@ -235,9 +252,48 @@ class FrameProcessor(
     override fun shutdown() {
         frameChannel.close()
         resetTrackingState()
+        clearPoseValidationQueue(recycleBitmaps = true)
+        poseValidationActive.set(false)
+        poseValidationComplete.set(false)
         closeInterpreterResources()
+        closePoseResources()
+        poseValidationResultChannel.close()
         consumerJob.cancel()
         aggregateJob.cancel()
+    }
+
+    private fun initializePoseInterpreterIfNeeded() {
+        if (poseInterpreter != null) return
+        val poseBuffer = poseModelBufferProvider?.invoke() ?: return
+        try {
+            poseInterpreter = PoseLandmarkInterpreter(poseBuffer)
+        } catch (error: Throwable) {
+            _lastError.value =
+                "Pose interpreter init failed: ${error.message ?: "unknown error"}"
+            closePoseResources()
+        }
+    }
+
+    override fun submitPoseValidationBatch(bitmaps: List<Bitmap>) {
+        if (bitmaps.isEmpty()) return
+        if (poseValidationActive.get()) {
+            bitmaps.forEach { it.recycle() }
+            _lastError.value = "Pose validation already running"
+            return
+        }
+
+        clearPoseValidationQueue(recycleBitmaps = true)
+        poseValidationComplete.set(false)
+        bitmaps.forEachIndexed { index, bitmap ->
+            poseValidationQueue.add(
+                PoseValidationEntry(
+                    sourceIndex = index,
+                    sourceName = "frame_${(index + 1).toString().padStart(4, '0')}",
+                    bitmap = bitmap
+                )
+            )
+        }
+        poseValidationActive.set(true)
     }
 
     private fun maybeApplyPendingMode(force: Boolean = false) {
@@ -361,12 +417,19 @@ class FrameProcessor(
         nnApiDelegate = null
     }
 
+    private fun closePoseResources() {
+        poseInterpreter?.close()
+        poseInterpreter = null
+    }
+
     private suspend fun processImage(image: ImageProxy) {
         try {
             if (interpreter == null) {
                 maybeApplyPendingMode(force = true)
             }
+            initializePoseInterpreterIfNeeded()
             val localInterpreter = interpreter ?: return
+            val frameStartNs = System.nanoTime()
 
             val imageTimestampNs = image.imageInfo.timestamp
             val rotationDegrees = image.imageInfo.rotationDegrees
@@ -412,11 +475,13 @@ class FrameProcessor(
             val bitmapW = bitmap.width
             val bitmapH = bitmap.height
             val processor = imageProcessors[normalizedRotation] ?: imageProcessors[0]!!
+            val yoloPreprocessStartNs = System.nanoTime()
             val tensorImage = try {
                 processor.process(TensorImage.fromBitmap(bitmap))
             } finally {
                 bitmap.recycle()
             }
+            val yoloPreprocessMs = elapsedMs(yoloPreprocessStartNs)
 
             val rotatedWidth: Int
             val rotatedHeight: Int
@@ -428,23 +493,33 @@ class FrameProcessor(
                 rotatedHeight = bitmapH
             }
 
-
             val inputBuffer = tensorImage.buffer
-            val inferenceStartNs = System.nanoTime()
-            val boxes = when (outputFormat) {
+            val boxes: List<DetectionBox>
+            val yoloInferenceMs: Double
+            val yoloNmsMs: Double
+            when (outputFormat) {
                 ModelOutputFormat.RAW_8400 -> {
                     for (row in outputTensorRaw[0]) row.fill(0f)
+                    val yoloInferenceStartNs = System.nanoTime()
                     localInterpreter.run(inputBuffer, outputTensorRaw)
-                    parseModelOutput(outputTensorRaw, CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD)
+                    yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                    val yoloNmsStartNs = System.nanoTime()
+                    boxes = parseModelOutput(outputTensorRaw, CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD)
+                    yoloNmsMs = elapsedMs(yoloNmsStartNs)
                 }
                 ModelOutputFormat.END_TO_END_300 -> {
                     for (row in outputTensorE2E[0]) row.fill(0f)
+                    val yoloInferenceStartNs = System.nanoTime()
                     localInterpreter.run(inputBuffer, outputTensorE2E)
-                    parseEndToEndOutput(outputTensorE2E, CONFIDENCE_THRESHOLD)
+                    yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                    val yoloNmsStartNs = System.nanoTime()
+                    boxes = parseEndToEndOutput(outputTensorE2E, CONFIDENCE_THRESHOLD)
+                    yoloNmsMs = elapsedMs(yoloNmsStartNs)
                 }
             }
-            val inferenceMs = (System.nanoTime() - inferenceStartNs) / 1_000_000.0
-            lastInferenceMs.set(inferenceMs)
+            lastInferenceMs.set(yoloInferenceMs)
             var bestBallBox: DetectionBox? = null
             for (box in boxes) {
                 if (box.classId != BALL_CLASS_ID) continue
@@ -469,10 +544,136 @@ class FrameProcessor(
                 trackedBall = trackedBall,
                 missStreak = ballTracker.missFrames
             )
+            processPoseValidationIfNeeded(
+                frameStartNs = frameStartNs,
+                yoloPreprocessMs = yoloPreprocessMs,
+                yoloInferenceMs = yoloInferenceMs,
+                yoloNmsMs = yoloNmsMs
+            )
         } catch (error: Throwable) {
             _lastError.value = "Frame processing failed: ${error.message ?: "unknown error"}"
         } finally {
             image.close()
+        }
+    }
+
+    private fun processPoseValidationIfNeeded(
+        frameStartNs: Long,
+        yoloPreprocessMs: Double,
+        yoloInferenceMs: Double,
+        yoloNmsMs: Double
+    ) {
+        if (!poseValidationActive.get()) return
+
+        val entry = poseValidationQueue.poll() ?: run {
+            poseValidationActive.set(false)
+            poseValidationComplete.set(true)
+            return
+        }
+        val localPoseInterpreter = poseInterpreter ?: run {
+            clearPoseValidationQueue(recycleBitmaps = true)
+            entry.bitmap.recycle()
+            poseValidationActive.set(false)
+            poseValidationComplete.set(true)
+            _lastError.value = "Pose interpreter unavailable for validation"
+            poseValidationResultChannel.trySend(
+                PoseFrameResult(
+                    sourceIndex = entry.sourceIndex,
+                    sourceName = entry.sourceName,
+                    yoloPreprocessMs = yoloPreprocessMs,
+                    yoloInferenceMs = yoloInferenceMs,
+                    yoloNmsMs = yoloNmsMs,
+                    poseCropMs = 0.0,
+                    posePreprocessMs = 0.0,
+                    poseInferenceMs = 0.0,
+                    posePostprocessMs = 0.0,
+                    frameTotalMs = elapsedMs(frameStartNs),
+                    posePresence = 0f,
+                    visibleJoints33 = 0,
+                    decodedLandmarks39 = 0,
+                    imageLandmarks33 = emptyList(),
+                    status = "error",
+                    error = "Pose interpreter unavailable",
+                    isLast = true
+                )
+            )
+            return
+        }
+
+        var poseCropMs = 0.0
+        var posePreprocessMs = 0.0
+        var poseInferenceMs = 0.0
+        var posePostprocessMs = 0.0
+        var posePresence = 0f
+        var visibleJoints33 = 0
+        var decodedLandmarks39 = 0
+        var imageLandmarks33: List<PoseImageLandmark> = emptyList()
+        var status = "ok"
+        var error: String? = null
+
+        try {
+            val poseCropStartNs = System.nanoTime()
+            val validationBitmap = squarePadCrop(entry.bitmap)
+            poseCropMs = elapsedMs(poseCropStartNs)
+
+            val poseResult = try {
+                localPoseInterpreter.infer(validationBitmap)
+            } finally {
+                if (validationBitmap !== entry.bitmap) {
+                    validationBitmap.recycle()
+                }
+            }
+            posePreprocessMs = poseResult.latency.preprocessMs
+            poseInferenceMs = poseResult.latency.inferenceMs
+            posePostprocessMs = poseResult.latency.postprocessMs
+            posePresence = poseResult.posePresence
+            imageLandmarks33 = poseResult.imageLandmarks33
+            visibleJoints33 = poseResult.imageLandmarks33.count {
+                it.visibility > POSE_VISIBILITY_THRESHOLD && it.presence > POSE_PRESENCE_THRESHOLD
+            }
+            decodedLandmarks39 = poseResult.imageLandmarks39.size
+        } catch (throwable: Throwable) {
+            status = "error"
+            error = throwable.message ?: "unknown error"
+        } finally {
+            entry.bitmap.recycle()
+        }
+
+        val isLast = poseValidationQueue.isEmpty()
+        if (isLast) {
+            poseValidationActive.set(false)
+            poseValidationComplete.set(true)
+        }
+
+        poseValidationResultChannel.trySend(
+            PoseFrameResult(
+                sourceIndex = entry.sourceIndex,
+                sourceName = entry.sourceName,
+                yoloPreprocessMs = yoloPreprocessMs,
+                yoloInferenceMs = yoloInferenceMs,
+                yoloNmsMs = yoloNmsMs,
+                poseCropMs = poseCropMs,
+                posePreprocessMs = posePreprocessMs,
+                poseInferenceMs = poseInferenceMs,
+                posePostprocessMs = posePostprocessMs,
+                frameTotalMs = elapsedMs(frameStartNs),
+                posePresence = posePresence,
+                visibleJoints33 = visibleJoints33,
+                decodedLandmarks39 = decodedLandmarks39,
+                imageLandmarks33 = imageLandmarks33,
+                status = status,
+                error = error,
+                isLast = isLast
+            )
+        )
+    }
+
+    private fun clearPoseValidationQueue(recycleBitmaps: Boolean) {
+        while (true) {
+            val next = poseValidationQueue.poll() ?: break
+            if (recycleBitmaps) {
+                next.bitmap.recycle()
+            }
         }
     }
 
@@ -750,6 +951,14 @@ class FrameProcessor(
         return sorted[index]
     }
 
+    private fun elapsedMs(startNs: Long): Double = (System.nanoTime() - startNs) / 1_000_000.0
+
+    private data class PoseValidationEntry(
+        val sourceIndex: Int,
+        val sourceName: String,
+        val bitmap: Bitmap
+    )
+
     private sealed interface FrameTask {
         data class Metadata(val frame: FramePacket) : FrameTask
         data class Image(val image: ImageProxy) : FrameTask
@@ -765,6 +974,8 @@ class FrameProcessor(
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.40f
         private const val NMS_IOU_THRESHOLD = 0.50f
+        private const val POSE_VISIBILITY_THRESHOLD = 0.60f
+        private const val POSE_PRESENCE_THRESHOLD = 0.50f
         private const val BALL_CLASS_ID = 0
         private const val DEFAULT_TRACKER_DT_SEC = 1f / 30f
         private const val MIN_TRACKER_DT_SEC = 1f / 120f

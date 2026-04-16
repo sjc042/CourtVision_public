@@ -1,6 +1,8 @@
 package com.courtvision.spike.pipeline
 
+import android.graphics.Bitmap
 import androidx.camera.core.ImageProxy
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 interface FrameProcessorGateway {
@@ -9,8 +11,10 @@ interface FrameProcessorGateway {
     val isSwitchingMode: StateFlow<Boolean>
     val lastError: StateFlow<String?>
     val rotationTelemetry: StateFlow<RotationTelemetry>
+    val poseValidationResults: Flow<PoseFrameResult>
 
     fun submitImage(image: ImageProxy)
+    fun submitPoseValidationBatch(bitmaps: List<Bitmap>)
     fun setInferenceMode(mode: InferenceMode)
     fun setTrackerMaxMissFrames(maxMissFrames: Int)
     fun setTrackerNoise(processNoise: Float, measurementNoise: Float)

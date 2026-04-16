@@ -1,6 +1,7 @@
 # Day 3 & Weekend Plan — YOLO TFLite Integration
 
-**Status:** Day 3 ✅ COMPLETED (2026-03-28) | Weekend ✅ COMPLETED (2026-03-30)
+**Status:** Day 3 ✅ COMPLETED (2026-03-28) | Weekend 🔲 Training In Progress
+
 
 ---
 
@@ -56,10 +57,9 @@ yolo export model=yolo26n.pt format=tflite half=True imgsz=640
 
 #### 3. Post-processing ✅
 
-- Parse raw output: `[1, num_boxes, 6]` (x, y, w, h, conf_ball, conf_hoop) or model-specific layout
-- Apply confidence threshold (start at 0.4) and NMS
-- Emit `DetectionResult(ballBox: BoundingBox?, hoopBox: BoundingBox?, inferenceMs: Long)` via `StateFlow`
-- **Implementation deviation:** Added support for end-to-end YOLO models with built-in NMS (commit `d8e3595`)
+- Parse raw output tensor layout (model-specific); apply confidence threshold (0.4) and NMS
+- **Implementation deviation:** Original design emitted `DetectionResult(ballBox, hoopBox)` for a 2-class model. Actual implementation uses 5-class (`ball`, `made`, `person`, `rim`, `shoot`) and emits a `DetectionFrame` containing a list of `DetectionBox(classId, confidence, left, top, right, bottom)` — all classes in one pass, filtered post-NMS by a class whitelist in the UI overlay. `DetectionResult` was never created.
+- **Implementation deviation:** Added support for end-to-end YOLO models with built-in NMS alongside standard YOLO (external NMS) (commit `d8e3595`)
 
 #### 4. CPU/GPU toggle + model selector UI + live stats — `camera/CameraScreen.kt` ✅
 
@@ -94,7 +94,7 @@ is producing plausible output before running the formal benchmark.
 
 - Record per-frame: `inferenceMs`, `analysisFps`, `ramMb`, `delegateMode` (CPU/GPU), `modelUsed` (asset-relative model path)
 - Thermal throttle detection: flag any 30-second window where FPS drops >20% below rolling average
-  (see [frame-scheduling-spec.md](frame-scheduling-spec.md) §Concern 3 for definition)
+  (note: `frame-scheduling-spec.md` is superseded by ADR-005 for the combined pipeline; thermal throttle definition remains valid for Day 3 single-model benchmarks)
 - Run once on GPU delegate, once on CPU — log both
 - Commit CSV + summary table to `/benchmarks/phase0/day3-{gpu|cpu}-s22plus.csv`
 - Ensure CSV contains a populated `model_used` column for every row
@@ -168,7 +168,7 @@ inference loop for Day 4+ testing.
 
 | Model | Input Size | Status |
 |-------|-----------|--------|
-| yolov8s | 640 / 480 / 320 | Pending |
+| yolov8s | 480 / 320 | Pending |
 | yolov11s | 640 / 480 / 320 | Pending | 
 
 Settings: Mixed precision, no dropout, default YOLO augmentation, cosine LR (50 epochs sufficient for convergence).
@@ -229,3 +229,19 @@ Per `docs/phase0-spike-plan.md` §Formal Evaluation Protocol — record results 
 - Support Library uses bilinear interpolation (better quality than manual nearest-neighbor)
 
 **Decision:** Switched `FrameProcessor` to use `ImageProcessor` + `TensorImage`. Added `tensorflow-lite-support:0.4.4` dependency. Removed manual `fillInputTensorFromBitmap`, `inputTensorBuffer`, and `reusablePixels`.
+
+---
+
+## Post-Day-3 Addition — NNAPI Delegate Mode (2026-04-01)
+
+Not part of the original Day 3 plan. Added as an extension to the CPU/GPU delegate work.
+
+1. Added `InferenceMode.NNAPI` enum value with runtime switching; CPU fallback on delegate init failure
+2. Added `NnApiDelegateProbe` — probed synchronously in `CameraViewModel.init` (Phase 2 note: move to `Dispatchers.Default`)
+3. Added NNAPI probe visibility in debug overlay and mode selector gating (hidden if probe returns unavailable)
+4. Added unit tests covering NNAPI probe state and CSV serialization of `delegate_mode=NNAPI`
+
+> **Note:** 
+- `InferenceMode.NNAPI` routes through Android's NNAPI HAL (CPU/GPU via vendor driver). On Qualcomm SoCs it does **not** access the Hexagon NPU — that requires the QNN TFLite delegate (Phase 2). See [ADR-005 Deferred section](../decisions/005-sequential-gpu-inference-pipeline.md).
+- Phase 0 choice: GPU/NNAPI probes run synchronously in `CameraViewModel.init`
+- Phase 2 note: move both delegate probes to `Dispatchers.Default`; note NNAPI ≠ NPU on Qualcomm (see ADR-005)

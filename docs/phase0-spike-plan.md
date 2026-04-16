@@ -64,47 +64,61 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 - YOLOv8n trained at 640/480/320: mAP50 = 0.940 / 0.935 / 0.895
 - Remaining: yolov8s, yolov11n, yolov11s training matrix
 
-### Day 4 — Ball Tracker (Kalman Filter)
+### Day 4 — Ball Tracker (Kalman Filter) ✅
 
 - Add Kalman filter tracker on top of ball bounding box output
 - Track ball position and velocity across frames — prerequisite for shot arc and geometry
 - Measure tracking stability and false positive rate
 - **Output:** Smooth ball trajectory over a 10-shot sequence
 
-### Day 5 — Pose Estimation Isolated (MediaPipe Pose / YOLO26n-pose)
+### Day 5 — Pose Landmark Model: Isolated Validation
 
-- Add MediaPipe Pose (or YOLO26n-pose as alternative) in a separate branch — not combined yet
-- Same benchmarks: FPS, per-frame latency, RAM
-- **PRD target:** Pose inference < 50ms
-- **Output:** Pose latency log on same device
-- **Scheduling spec:** [Frame Scheduling Spec](plans/frame-scheduling-spec.md) — must be complete before Day 5
+> Architecture: [ADR-005 — Sequential GPU Inference Pipeline](decisions/005-sequential-gpu-inference-pipeline.md)
 
-### Day 6 — Combined Pipeline
+- Extract `pose_landmark_lite.tflite` from MediaPipe `.task` bundle; load as standalone TFLite `Interpreter` with `GpuDelegate`
+- **Do not** use the MediaPipe `PoseLandmarker` task API — ADR-005 replaces its internal person detector with YOLO's `person` bbox
+- Feed manually cropped 256×256 person images (static test frames, not live camera yet)
+- Verify 33 `WorldLandmarks` output: correct joint positions against video ground truth (10 clips minimum)
+- Benchmark isolated pose inference: per-frame latency, FPS, RAM on Pixel 6 and Galaxy A54
+- Verify two `GpuDelegate` interpreters co-exist on `Dispatchers.Default.limitedParallelism(1)` — ADR-005 Verification Gate §1 (EGL context)
+- **PRD target:** Pose inference < 50ms per frame
+- **Output:** Pose latency log + EGL context verification result recorded in CONTEXT.md
 
-- Run YOLO detector + Kalman tracker + Pose estimator (MediaPipe Pose or YOLO26n-pose) simultaneously
-- Measure: GPU/CPU contention, thermal throttling, RAM over 10-min session
-- **PRD targets:** RAM < 400MB, no sustained thermal throttle
+### Day 6 — Sequential GPU Combined Pipeline
+
+> Architecture: [ADR-005 — Sequential GPU Inference Pipeline](decisions/005-sequential-gpu-inference-pipeline.md)
+
+- Integrate YOLO + pose as sequential stages on a single inference dispatcher (ADR-005 pipeline diagram)
+- YOLO `person` bbox → `squarePadCrop(margin=1.25)` → 256×256 → pose landmark model — all on GPU, same thread
+- Skip pose when FSM state is `IDLE` or `MADE` (no biomechanics needed — reduces GPU load)
+- Pre-allocate all input/output `ByteBuffer`s at init; verify zero GC events during `analyzeFrame`
+- Measure: combined YOLO + pose p95 latency, GPU/CPU contention, thermal throttling, RAM over 10-min session
+- **PRD targets:** Combined p95 ≤ 50ms on Pixel 6, ≤ 80ms on A54; RAM < 400MB; no sustained thermal throttle
+- **Fallback:** If A54 p95 > 80ms, fall back to pose on CPU (4 threads, every 3rd frame) — see ADR-005 Config D
 - **Output:** Combined performance report
 
 ### Day 7 — Shot Detection Logic (State Machine)
 
 - Implement state machine: IDLE → PREP → RELEASE → FLIGHT → OUTCOME
-- Use ball trajectory (tracker) + hoop bounding box (spatial anchor) for make/miss
+- Use ball trajectory (Kalman tracker) + hoop bounding box (spatial anchor) for make/miss
+- Use pose landmarks for FSM transitions: wrist-above-shoulder gate for RELEASE detection, knee flexion for PREP
 - Ground Mode fallback: trajectory-only logic when hoop is not in frame
 - Console/log output is sufficient — no UI polish needed
 - **Output:** Shot counter logging make/miss across both Ground and Tripod scenarios
 
 ### Day 8 — Decision Checkpoint
 
-- [ ] Ball detection latency < 100ms
-- [ ] Pose inference latency < 50ms
-- [ ] Combined RAM < 400MB
-- [ ] End-to-end FPS ≥ 20 (target 30, red flag below 20)
-- [ ] Shot detection stable across both capture modes
+- [ ] Ball detection latency < 100ms (p95 < 140ms)
+- [ ] Pose inference latency < 50ms (p95 < 70ms)
+- [ ] Combined YOLO + pose p95 ≤ 80ms on A54
+- [ ] Combined RAM < 400MB sustained
+- [ ] End-to-end FPS ≥ 20 sustained for 10 min (target 30)
+- [ ] Shot detection stable across Tripod and Ground modes
+- [ ] Two `GpuDelegate` interpreters verified stable on Pixel 6 and A54
 
 **If green** → proceed to full architecture build (Phase 2)
 
-**If red** → revisit model quantization, input resolution (try 416 or 320), delegate strategy, or descope pose from MVP
+**If red** → apply Config D fallback (pose on CPU), revisit model quantization or input resolution (416 or 320), or descope pose from MVP. NPU acceleration via QNN delegate is a Phase 2 optimization (see ADR-005 Deferred section) — not available during the spike.
 
 ---
 

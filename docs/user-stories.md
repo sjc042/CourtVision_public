@@ -301,7 +301,7 @@ Version 1.0 | Planning Stage | March 2026
 
 ### US-14 | Release Angle
 
-> *As a player, I want to see my release angle in degrees for each shot, with a clear indicator of whether it falls in the optimal 45-55 degree range, so that I can improve my shot arc with objective feedback.*
+> *As a player, I want to see my release angle — the ballistic launch angle of the ball relative to the horizontal ground plane — in degrees for each shot, with a clear indicator of whether it falls in the optimal 40–55 degree range, so that I can improve my shot arc with objective feedback.*
 
 | Field | Value |
 | --- | --- |

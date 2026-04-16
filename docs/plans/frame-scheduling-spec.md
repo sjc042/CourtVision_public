@@ -3,6 +3,12 @@
 **CourtVision Phase 0 Spike**
 Created: 2026-03-27 | Resolves: ISSUE-003 | Fix before: Day 5
 
+> **⚠️ Superseded by [ADR-005](../decisions/005-sequential-gpu-inference-pipeline.md) (2026-04-07).**
+> The Worker A / Worker B two-channel architecture proposed here was replaced with a sequential
+> GPU pipeline on a single `consumerDispatcher`. Q1–Q3 answers are invalidated; Q4 and Q5
+> definitions are preserved and re-stated in ADR-005 §Scheduling Definitions.
+> This file is retained for historical reference only.
+
 ---
 
 ## Problem

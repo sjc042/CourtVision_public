@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -88,6 +89,11 @@ fun CameraScreen(
         hasPermission = granted
         viewModel.onCameraPermissionResult(granted)
     }
+    val poseValidationPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        viewModel.startDay5PoseIsolatedValidation(uris)
+    }
 
     LaunchedEffect(hasPermission) {
         viewModel.onCameraPermissionResult(hasPermission)
@@ -118,7 +124,12 @@ fun CameraScreen(
             onTrackerNoiseChanged = viewModel::setTrackerNoise,
             onModelSelect = viewModel::setModel,
             onConfirmModel = viewModel::confirmModel,
-            onRestartSession = viewModel::restartSession
+            onRestartSession = viewModel::restartSession,
+            onRunPoseValidation = {
+                poseValidationPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
         )
     }
 }
@@ -411,7 +422,8 @@ private fun MetricsOverlay(
     onTrackerNoiseChanged: (Float, Float) -> Unit,
     onModelSelect: (String) -> Unit,
     onConfirmModel: () -> Unit,
-    onRestartSession: () -> Unit
+    onRestartSession: () -> Unit,
+    onRunPoseValidation: () -> Unit
 ) {
     val modelSelectionLocked = uiState.modelConfirmed
 
@@ -489,6 +501,26 @@ private fun MetricsOverlay(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        Text(
+            "Pose Validation: ${uiState.poseValidationStatus}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (uiState.poseValidationOutputPath.isNotBlank()) {
+            Text(
+                "Pose Output: ${uiState.poseValidationOutputPath}",
+                color = Color.White,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Button(
+            onClick = onRunPoseValidation,
+            enabled = !uiState.poseValidationRunning && uiState.modelConfirmed
+        ) {
+            Text("Select Day5 Pose Images")
+        }
         
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = Color.White.copy(alpha = 0.2f))
         Text("Tracker Tuning", color = Color.Cyan, style = MaterialTheme.typography.titleSmall)

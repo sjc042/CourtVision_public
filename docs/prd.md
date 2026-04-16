@@ -82,7 +82,7 @@ CourtVision is an Android-native basketball performance tracking app that uses o
 | Shot Type Classification | Identify catch-and-shoot, pull-up, step-back, post moves | P1 |
 | Release Time | Estimate time taken to shoot the ball | P1 |
 | Release Speed | Estimate ball velocity from frame-delta of detected ball | P1 |
-| Release Angle | MediaPipe pose landmarks compute wrist/elbow angle at release | P1 |
+| Release Angle | Ballistic launch angle of ball relative to horizontal plane, derived from Kalman tracker velocity at release | P1 |
 | Leg Angle (Knee Bend) | Detect knee flexion angle using pose estimation at shot prep | P1 |
 | Session History & Stats | Store session summaries locally; shooting % trends over time | P1 |
 | Drill Mode | Guided shooting drills with targets (e.g., corner 3s only) | P2 |
@@ -157,9 +157,9 @@ CourtVision is an Android-native basketball performance tracking app that uses o
 
 #### Release Angle
 
-- Computed from elbow-wrist vector at the frame of ball release (detected via pose landmarks).
-- Angle relative to vertical axis. Optimal range: 45-55 degrees flagged as ideal.
-- Available in both capture modes.
+- Ballistic launch angle of the ball relative to the ground/horizontal plane.
+- Derived from the Kalman tracker's velocity state `(vx, vy)` at the release frame — not from pose landmarks.
+- Optimal range: 40–55 degrees above horizontal. Available in both capture modes.
 
 #### Leg Angle (Knee Flexion)
 

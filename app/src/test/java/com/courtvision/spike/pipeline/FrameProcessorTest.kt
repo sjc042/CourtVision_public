@@ -6,6 +6,7 @@ import androidx.camera.core.ImageInfo
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.impl.TagBundle
 import androidx.camera.core.impl.utils.ExifData
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -262,6 +263,70 @@ class FrameProcessorTest {
 
             val updated = lastImageTimestampField.getLong(processor)
             assertEquals(-1L, updated)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun submitImage_dropsFrames_whenPoseValidationMarkedComplete() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val image = FakeImageProxy()
+
+        try {
+            val completeField = FrameProcessor::class.java.getDeclaredField("poseValidationComplete")
+            completeField.isAccessible = true
+            val complete = completeField.get(processor) as AtomicBoolean
+            complete.set(true)
+
+            processor.submitImage(image)
+
+            assertTrue(image.isClosed)
+            assertEquals(0, processor.stats.value.queueDepth)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun submitPoseValidationBatch_emptyList_keepsValidationInactive() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            processor.submitPoseValidationBatch(emptyList())
+
+            val activeField = FrameProcessor::class.java.getDeclaredField("poseValidationActive")
+            activeField.isAccessible = true
+            val active = activeField.get(processor) as AtomicBoolean
+            assertFalse(active.get())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun resetInterpreter_clearsPoseValidationFlags() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            val activeField = FrameProcessor::class.java.getDeclaredField("poseValidationActive")
+            activeField.isAccessible = true
+            val active = activeField.get(processor) as AtomicBoolean
+            active.set(true)
+
+            val completeField = FrameProcessor::class.java.getDeclaredField("poseValidationComplete")
+            completeField.isAccessible = true
+            val complete = completeField.get(processor) as AtomicBoolean
+            complete.set(true)
+
+            processor.resetInterpreter()
+            testScheduler.runCurrent()
+
+            assertFalse(active.get())
+            assertFalse(complete.get())
         } finally {
             processor.shutdown()
         }

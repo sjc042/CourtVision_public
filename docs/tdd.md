@@ -11,7 +11,7 @@ Version 1.0 | Planning Stage | March 2026
 | Field | Detail |
 | --- | --- |
 | **Project** | CourtVision — Android Basketball AI Tracker |
-| **Primary Stack** | Kotlin, CameraX, MediaPipe / YOLO26n-pose, TensorFlow Lite (YOLOv8n / YOLO26n), ARCore |
+| **Primary Stack** | Kotlin, CameraX, pose_landmark_lite.tflite (TFLite GPU delegate, ADR-005), TensorFlow Lite (YOLOv8n / YOLO26n), ARCore |
 | **Architecture Pattern** | MVVM + Clean Architecture (Repository Pattern) |
 | **Target Latency** | <50ms pose inference, <100ms object detection per frame |
 
@@ -26,7 +26,7 @@ CourtVision follows a Clean Architecture / MVVM pattern with these layers:
 - **Presentation Layer** — Jetpack Compose UI, ViewModels, UI state management.
 - **Domain Layer** — Use cases, business logic, shot detection algorithms, metric computation.
 - **Data Layer** — Room DB (local sessions), file storage (clips), optional cloud sync repository.
-- **ML / CV Layer** — CameraX feed, MediaPipe Pose (alt: YOLO26n-pose), single multi-class TFLite detector (5 classes: `ball`, `made`, `person`, `rim`, `shoot`; alt: YOLO26n), ARCore spatial anchors.
+- **ML / CV Layer** — CameraX feed, pose_landmark_lite.tflite standalone TFLite interpreter (GPU delegate, sequential pipeline per ADR-005), single multi-class TFLite YOLO detector (5 classes: `ball`, `made`, `person`, `rim`, `shoot`; alt: YOLO26n), ARCore spatial anchors.
 
 ### 2.2 Module Structure
 
@@ -35,7 +35,7 @@ CourtVision follows a Clean Architecture / MVVM pattern with these layers:
 :feature:capture      — Camera session, mode switching, live overlay
 :feature:analytics    — Heatmap, session review, shot timeline
 :feature:history      — Session list, drill history, progress charts
-:core:ml              — MediaPipe / YOLO26n-pose wrapper, TFLite YOLOv8n / YOLO26n multi-class detector (ball, made, person, rim, shoot)
+:core:ml              — TFLite YOLOv8n multi-class detector (ball, made, person, rim, shoot), pose_landmark_lite.tflite interpreter (sequential GPU pipeline, ADR-005)
 :core:ar              — ARCore ground plane, homography, court mapper
 :core:data            — Room entities, DAOs, Repository interfaces
 :core:domain          — Use cases, models, ShotMetrics data classes
@@ -53,7 +53,7 @@ CourtVision follows a Clean Architecture / MVVM pattern with these layers:
 | Architecture | MVVM + Clean Architecture | Android Architecture Components |
 | DI Framework | Hilt (Dagger) | 2.x |
 | Camera | CameraX | Jetpack — API 21+ |
-| Pose Estimation | MediaPipe Pose Landmarker (alt: YOLO26n-pose) | 0.10.x — 33 landmarks, 30fps |
+| Pose Estimation | `pose_landmark_lite.tflite` (standalone TFLite `Interpreter`, GPU delegate) — see ADR-005 | 33 WorldLandmarks; not via PoseLandmarker task API |
 | Object Detection | TensorFlow Lite (YOLOv8n FP16) (alt: YOLO26n) | 5-class model: `ball`, `made`, `person`, `rim`, `shoot` |
 | AR / Spatial | ARCore | Google — ground plane + anchors |
 | Computer Vision | OpenCV Android | 4.x — corner/line detection, homography |
@@ -74,16 +74,24 @@ CameraX ImageAnalysis use case provides YUV_420_888 frames at 30fps to a process
 - **Frame rate target:** 30fps analysis; display preview at 60fps uncoupled.
 - CameraX binds to lifecycle; session cleanup handled automatically.
 
-### 4.2 Pose Estimation (MediaPipe Pose Landmarker / YOLO26n-pose)
+### 4.2 Pose Estimation (Sequential GPU Pipeline — ADR-005)
 
-MediaPipe Pose Landmarker detects 33 body landmarks per frame. Alternative: YOLO26n-pose, which unifies object detection and pose estimation in a single inference pass. Key landmarks used:
+> Architecture decision: [ADR-005 — Sequential GPU Inference Pipeline](decisions/005-sequential-gpu-inference-pipeline.md)
 
-- **Landmarks 15/16 (wrists)** — release point and angle computation.
-- **Landmarks 13/14 (elbows)** — elbow flexion at release.
-- **Landmarks 23/24 (hips)** — jump height displacement.
-- **Landmarks 25/26 (knees) + 27/28 (ankles)** — knee flexion / leg angle.
+The `pose_landmark_lite.tflite` model is loaded as a standalone TFLite `Interpreter` with `GpuDelegate` — **not** via the MediaPipe `PoseLandmarker` task API. The internal person detector in the task API is replaced by YOLO's `person` bounding box, eliminating duplicate detection work.
 
-Landmark world coordinates (normalized to body scale) are used for angle calculations to be camera-distance independent.
+Pipeline per frame (RELEASE/FLIGHT states only — skip in IDLE/MADE):
+1. YOLO `person` bbox → `squarePadCrop(margin=1.25f)` → 256×256 Bitmap
+2. `pose_landmark_lite.tflite` inference on GPU delegate (same `inferenceDispatcher` as YOLO)
+3. Decode 33 `WorldLandmarks` (meters, Y-up, hip-midpoint origin)
+
+Key landmarks used:
+- **15/16 (wrists)** — wrist-above-shoulder gate for FSM RELEASE transition.
+- **13/14 (elbows)** — elbow flexion angle.
+- **23/24 (hips)** — jump height displacement.
+- **25/26 (knees) + 27/28 (ankles)** — knee flexion / leg angle.
+
+Use `WorldLandmarks` (not image-space `Landmarks`) for all angle computations — metric coordinates independent of camera distance. Gate all angle computation on landmark `visibility > 0.6`.
 
 ### 4.3 Ball + Hoop Detection Model (Canonical)
 
@@ -174,10 +182,12 @@ Classification uses hip and foot landmark velocity vectors over a 1-2 second win
 
 ### 6.3 Release Angle
 
-- At the release frame: extract 3D world-space coordinates of Elbow (E) and Wrist (W) landmarks from MediaPipe's pose_world_landmarks.
-- Forearm direction vector: `V = (Wx − Ex, Wy − Ey, Wz − Ez)`
-- Release angle: `θ = atan2(Ey − Wy, √((Wx − Ex)² + (Wz − Ez)²))`
-- Threshold feedback: θ < 40° = Too flat | 40°-55° = Optimal | θ > 55° = Too steep.
+**Definition:** Ballistic launch angle of the ball relative to the ground/horizontal plane — the elevation angle of the ball's velocity vector at the moment of release.
+
+- Source: Kalman tracker velocity state `(vx_px, vy_px)` in pixels/frame at the release frame (image Y-axis points down, so upward motion = negative `vy_px`).
+- Convert pixel velocities to world-space using ARCore ground plane scale (tripod) or player height reference (ground mode) — same scale factor as Release Speed (§6.1).
+- Release angle: `θ = atan2(−vy_world, |vx_world|)` — positive θ = ball launched above horizontal.
+- Valid shooting range: θ ∈ [35°, 75°]. Threshold feedback: θ < 40° = Too flat | 40°–55° = Optimal | θ > 55° = Too steep.
 
 ### 6.4 Leg Angle (Knee Flexion)
 
@@ -217,7 +227,7 @@ DrillResult: id, sessionId, drillType, targetZone, completionRate, avgReleaseSpe
 
 ## 8. Performance Targets
 
-> For Day 6 combined pipeline pass/fail criteria, see [Frame Scheduling Spec](plans/frame-scheduling-spec.md#day-6-passfail-criteria).
+> For Day 6 combined pipeline pass/fail criteria, see [phase0-spike-plan.md Day 6](phase0-spike-plan.md) and [ADR-005 Verification Gate](decisions/005-sequential-gpu-inference-pipeline.md). The original `frame-scheduling-spec.md` (two-worker architecture) is superseded by ADR-005.
 
 | Metric | Target |
 | --- | --- |

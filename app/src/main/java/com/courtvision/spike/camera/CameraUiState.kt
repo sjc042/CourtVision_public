@@ -30,5 +30,8 @@ data class CameraUiState(
     val detectionFrame: DetectionFrame = DetectionFrame(),
     val logFilePath: String = "",
     val trackingLogFilePath: String = "",
+    val poseValidationRunning: Boolean = false,
+    val poseValidationStatus: String = "IDLE",
+    val poseValidationOutputPath: String = "",
     val lastError: String? = null
 )

@@ -308,11 +308,11 @@ Add acceptance criteria for each story. Draft AC below — review and adjust bef
 - [ ] Speed computed using ball centroid displacement + ARCore scale (tripod mode) or player height reference (ground mode)
 
 **US-14 | Release Angle**
-- [ ] Release angle computed from elbow-wrist landmark vector at detected release frame
+- [ ] Release angle is the ballistic launch angle of the ball relative to the ground/horizontal plane at the moment of release
+- [ ] Computed from Kalman tracker velocity state `(vx, vy)` at the release frame — not from pose landmarks
 - [ ] Displayed in degrees, rounded to one decimal place
 - [ ] Feedback label shown: "Too flat" (<40°), "Optimal" (40°–55°), "Too steep" (>55°)
 - [ ] Available in both capture modes
-- [ ] Uses `pose_world_landmarks` (3D world space), not image-space coordinates
 
 **US-15 | Knee Flexion Feedback**
 - [ ] Knee angle measured at prep phase (0.2–0.5s before release, foot velocity ~0)

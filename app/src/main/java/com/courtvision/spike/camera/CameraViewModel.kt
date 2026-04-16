@@ -1,8 +1,16 @@
 package com.courtvision.spike.camera
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.provider.OpenableColumns
+import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,18 +23,31 @@ import com.courtvision.spike.pipeline.InferenceMode
 import com.courtvision.spike.pipeline.NnApiDelegateProbe
 import com.courtvision.spike.pipeline.PerformanceCsvLogger
 import com.courtvision.spike.pipeline.PerformanceLogger
+import com.courtvision.spike.pipeline.PoseFrameResult
+import com.courtvision.spike.pipeline.PoseImageLandmark
+import com.courtvision.spike.pipeline.PoseTensorContract
 import com.courtvision.spike.pipeline.RotationTelemetry
 import com.courtvision.spike.pipeline.SpikeImageAnalyzer
 import com.courtvision.spike.pipeline.TrackingCsvLogger
 import com.courtvision.spike.pipeline.TrackingLogger
+import java.io.File
 import java.io.FileInputStream
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.floor
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class CameraViewModel(
     application: Application
@@ -44,6 +65,7 @@ class CameraViewModel(
         overrides?.frameProcessor ?: FrameProcessor(
             scope = viewModelScope,
             modelBufferProvider = ::loadModelBuffer,
+            poseModelBufferProvider = ::loadPoseModelBuffer,
             thermalStatusProvider = ::readThermalStatus
         )
     private val performanceLogger: PerformanceLogger =
@@ -67,6 +89,10 @@ class CameraViewModel(
 
     @Volatile
     private var cachedModelBuffer: MappedByteBuffer? = null
+    @Volatile
+    private var cachedPoseModelBuffer: MappedByteBuffer? = null
+
+    private var poseValidationCollectorJob: Job? = null
 
     init {
         // Phase 0 decision: keep probes synchronous in init for deterministic startup behavior.
@@ -230,6 +256,12 @@ class CameraViewModel(
         if (!availableModelPaths.contains(modelPath)) return
         if (modelPath == selectedModelPath) return
 
+        if (_uiState.value.poseValidationRunning) {
+            cancelPoseValidation(
+                status = "CANCELLED: model changed",
+                error = "Pose validation cancelled because model changed before start."
+            )
+        }
         selectedModelPath = modelPath
         cachedModelBuffer = null
         frameProcessor.resetInterpreter()
@@ -254,6 +286,8 @@ class CameraViewModel(
     }
 
     fun restartSession() {
+        poseValidationCollectorJob?.cancel()
+        poseValidationCollectorJob = null
         cachedModelBuffer = null
         frameProcessor.resetInterpreter()
         _uiState.update { state ->
@@ -261,12 +295,98 @@ class CameraViewModel(
                 modelConfirmed = false,
                 detectionFrame = DetectionFrame(),
                 isSwitchingMode = false,
+                poseValidationRunning = false,
+                poseValidationStatus = "IDLE",
+                poseValidationOutputPath = "",
                 lastError = null
             )
         }
     }
 
+    fun startDay5PoseIsolatedValidation(uris: List<Uri>) {
+        if (_uiState.value.poseValidationRunning) return
+        if (!_uiState.value.modelConfirmed) {
+            _uiState.update {
+                it.copy(
+                    poseValidationStatus = "FAILED: start inference first",
+                    lastError = "Confirm model and start inference before pose validation."
+                )
+            }
+            return
+        }
+        if (uris.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    poseValidationStatus = "FAILED: no images selected",
+                    lastError = "No images selected for pose validation."
+                )
+            }
+            return
+        }
+
+        poseValidationCollectorJob?.cancel()
+        poseValidationCollectorJob = null
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    poseValidationRunning = true,
+                    poseValidationStatus = "RUNNING",
+                    poseValidationOutputPath = "",
+                    lastError = null
+                )
+            }
+
+            val outputDir = createPoseOutputDirectory()
+            if (outputDir == null) {
+                _uiState.update {
+                    it.copy(
+                        poseValidationRunning = false,
+                        poseValidationStatus = "FAILED: cannot create output directory",
+                        lastError = "Unable to create pose output directory."
+                    )
+                }
+                return@launch
+            }
+
+            val decodedSources = withContext(Dispatchers.IO) {
+                decodePoseValidationSources(uris)
+            }
+            if (decodedSources.isEmpty()) {
+                _uiState.update {
+                    it.copy(
+                        poseValidationRunning = false,
+                        poseValidationStatus = "FAILED: no decodable images",
+                        poseValidationOutputPath = outputDir.absolutePath,
+                        lastError = "Unable to decode selected images for pose validation."
+                    )
+                }
+                return@launch
+            }
+
+            val csvFile = File(outputDir, "day5_pose_validation.csv")
+            val summaryFile = File(outputDir, "day5_pose_summary.txt")
+            csvFile.writeText(POSE_VALIDATION_CSV_HEADER + "\n")
+
+            val sourcesByIndex = decodedSources.mapIndexed { index, source ->
+                index to source.source
+            }.toMap()
+
+            poseValidationCollectorJob = viewModelScope.launch(Dispatchers.IO) {
+                collectPoseValidationResults(
+                    outputDir = outputDir,
+                    csvFile = csvFile,
+                    summaryFile = summaryFile,
+                    sourcesByIndex = sourcesByIndex
+                )
+            }
+
+            frameProcessor.submitPoseValidationBatch(decodedSources.map { it.bitmap })
+        }
+    }
+
     override fun onCleared() {
+        poseValidationCollectorJob?.cancel()
         performanceLogger.close()
         trackingLogger.close()
         frameProcessor.shutdown()
@@ -274,6 +394,18 @@ class CameraViewModel(
     }
 
     private fun isModelSelectionLocked(): Boolean = _uiState.value.modelConfirmed
+
+    private fun cancelPoseValidation(status: String, error: String?) {
+        poseValidationCollectorJob?.cancel()
+        poseValidationCollectorJob = null
+        _uiState.update { state ->
+            state.copy(
+                poseValidationRunning = false,
+                poseValidationStatus = status,
+                lastError = error
+            )
+        }
+    }
 
     private fun loadModelBuffer(): MappedByteBuffer {
         cachedModelBuffer?.let { return it }
@@ -292,6 +424,259 @@ class CameraViewModel(
             cachedModelBuffer = mapped
             return mapped
         }
+    }
+
+    private fun loadPoseModelBuffer(): MappedByteBuffer {
+        cachedPoseModelBuffer?.let { return it }
+        synchronized(this) {
+            cachedPoseModelBuffer?.let { return it }
+            val mapped = getApplication<Application>().assets.openFd(POSE_MODEL_ASSET_PATH).use { assetFile ->
+                FileInputStream(assetFile.fileDescriptor).channel.use { channel ->
+                    channel.map(
+                        FileChannel.MapMode.READ_ONLY,
+                        assetFile.startOffset,
+                        assetFile.declaredLength
+                    )
+                }
+            }
+            cachedPoseModelBuffer = mapped
+            return mapped
+        }
+    }
+
+    private suspend fun collectPoseValidationResults(
+        outputDir: File,
+        csvFile: File,
+        summaryFile: File,
+        sourcesByIndex: Map<Int, PoseValidationSource>
+    ) {
+        val poseInferenceSamples = mutableListOf<Double>()
+        val overlaySamples = mutableListOf<Double>()
+        var successCount = 0
+        var failureCount = 0
+
+        try {
+            frameProcessor.poseValidationResults
+                .transformWhile { result ->
+                    emit(result)
+                    !result.isLast
+                }
+                .collect { result ->
+                    val source = sourcesByIndex[result.sourceIndex]
+                    val sourceName = source?.displayName ?: result.sourceName
+                    val overlayMs = writePoseOverlayForResult(outputDir, source, result)
+
+                    csvFile.appendText(
+                        buildPoseCsvRow(
+                            sourceName = sourceName,
+                            overlayMs = overlayMs,
+                            result = result
+                        ) + "\n"
+                    )
+
+                    if (result.status == "ok") {
+                        successCount += 1
+                        poseInferenceSamples += result.poseInferenceMs
+                    } else {
+                        failureCount += 1
+                    }
+                    overlaySamples += overlayMs
+                }
+
+            val p95Inference = percentile(poseInferenceSamples, 0.95)
+            val selectedMode = _uiState.value.selectedMode
+            val gpuModeForSummary = if (selectedMode == InferenceMode.CPU) "CPU" else "GPU"
+            val thermalStatusForSummary = readThermalStatus()
+            val summaryLines = listOf(
+                "device=${Build.MODEL}",
+                "gpu_mode=$gpuModeForSummary",
+                "input_size=${PoseTensorContract.INPUT_SIZE}",
+                "thermal_status=$thermalStatusForSummary",
+                "samples=${successCount + failureCount}",
+                "success=$successCount",
+                "failure=$failureCount",
+                "pose_inference_p50_ms=${formatDouble(percentile(poseInferenceSamples, 0.50))}",
+                "pose_inference_p95_ms=${formatDouble(p95Inference)}",
+                "overlay_p50_ms=${formatDouble(percentile(overlaySamples, 0.50))}",
+                "overlay_p95_ms=${formatDouble(percentile(overlaySamples, 0.95))}",
+                "pose_inference_gate_s22=${formatGate(p95Inference)}",
+                "mode=sequential_yolo_warm"
+            )
+            summaryFile.writeText(summaryLines.joinToString(separator = "\n"))
+
+            _uiState.update {
+                it.copy(
+                    poseValidationRunning = false,
+                    poseValidationStatus = "DONE: $successCount ok, $failureCount failed, p95 inf=${formatDouble(p95Inference)}ms",
+                    poseValidationOutputPath = outputDir.absolutePath,
+                    lastError = null
+                )
+            }
+        } catch (_: CancellationException) {
+            // Expected when session is restarted or ViewModel is cleared.
+        } catch (error: Throwable) {
+            Log.e(POSE_RUN_TAG, "Pose validation collection failed", error)
+            _uiState.update {
+                it.copy(
+                    poseValidationRunning = false,
+                    poseValidationStatus = "FAILED: ${error.message ?: "unknown error"}",
+                    poseValidationOutputPath = outputDir.absolutePath,
+                    lastError = "Pose validation failed: ${error.message ?: "unknown error"}"
+                )
+            }
+        }
+    }
+
+    private suspend fun decodePoseValidationSources(uris: List<Uri>): List<PoseValidationInput> {
+        return withContext(Dispatchers.IO) {
+            val sources = mutableListOf<PoseValidationInput>()
+            uris.forEachIndexed { index, uri ->
+                val bitmap = decodeBitmap(uri) ?: return@forEachIndexed
+                sources += PoseValidationInput(
+                    source = PoseValidationSource(
+                        uri = uri,
+                        displayName = resolveDisplayName(uri, index)
+                    ),
+                    bitmap = bitmap
+                )
+            }
+            sources
+        }
+    }
+
+    private fun decodeBitmap(uri: Uri): Bitmap? {
+        return try {
+            getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
+                val options = BitmapFactory.Options().apply {
+                    // Force software-backed pixels for TensorImage.load()/getPixels() compatibility.
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                BitmapFactory.decodeStream(stream, null, options)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun resolveDisplayName(uri: Uri, index: Int): String {
+        getApplication<Application>().contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) {
+                val value = cursor.getString(nameIndex)
+                if (!value.isNullOrBlank()) return value
+            }
+        }
+        return "frame_${(index + 1).toString().padStart(4, '0')}.png"
+    }
+
+    private fun createPoseOutputDirectory(): File? {
+        val root = overrides?.poseOutputRootProvider?.invoke()
+            ?: getApplication<Application>().getExternalFilesDir(null)
+            ?: return null
+        val parent = File(root, POSE_OUTPUT_FOLDER_NAME)
+        if (!parent.exists() && !parent.mkdirs()) return null
+        val outputDir = File(parent, "inference_${timestampForFileName()}")
+        if (!outputDir.exists() && !outputDir.mkdirs()) return null
+        return outputDir
+    }
+
+    private fun writePoseOverlayForResult(
+        outputDir: File,
+        source: PoseValidationSource?,
+        result: PoseFrameResult
+    ): Double {
+        if (source == null || result.status != "ok") return 0.0
+        val sourceBitmap = decodeBitmap(source.uri) ?: return 0.0
+        return try {
+            val fileStem = sanitizeFileStem(source.displayName)
+            renderPoseOverlay(
+                source = sourceBitmap,
+                landmarks = result.imageLandmarks33,
+                outputFile = File(outputDir, "${fileStem}_overlay.png")
+            )
+        } finally {
+            sourceBitmap.recycle()
+        }
+    }
+
+    private fun buildPoseCsvRow(
+        sourceName: String,
+        overlayMs: Double,
+        result: PoseFrameResult
+    ): String {
+        return buildString {
+            append(timestampForCsv()).append(',')
+            append(sanitizeCsv(sourceName)).append(',')
+            append(formatDouble(result.yoloPreprocessMs)).append(',')
+            append(formatDouble(result.yoloInferenceMs)).append(',')
+            append(formatDouble(result.yoloNmsMs)).append(',')
+            append(formatDouble(result.poseCropMs)).append(',')
+            append(formatDouble(result.posePreprocessMs)).append(',')
+            append(formatDouble(result.poseInferenceMs)).append(',')
+            append(formatDouble(result.posePostprocessMs)).append(',')
+            append(formatDouble(result.frameTotalMs)).append(',')
+            append(formatDouble(overlayMs)).append(',')
+            append(formatDouble(result.posePresence.toDouble())).append(',')
+            append(result.visibleJoints33).append(',')
+            append(result.decodedLandmarks39).append(',')
+            append(result.status).append(',')
+            append(sanitizeCsv(result.error.orEmpty()))
+        }
+    }
+
+    private fun renderPoseOverlay(
+        source: Bitmap,
+        landmarks: List<PoseImageLandmark>,
+        outputFile: File
+    ): Double {
+        val startNs = System.nanoTime()
+
+        val mutable = source.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(mutable)
+        val pointPaint = Paint().apply {
+            color = Color.YELLOW
+            style = Paint.Style.FILL
+            strokeWidth = 5f
+            isAntiAlias = true
+        }
+        val lowConfidencePaint = Paint().apply {
+            color = Color.RED
+            style = Paint.Style.FILL
+            strokeWidth = 5f
+            isAntiAlias = true
+        }
+
+        val side = maxOf(mutable.width, mutable.height).toFloat()
+        val inputSize = PoseTensorContract.INPUT_SIZE.toFloat()
+        val sideScale = side / inputSize
+        val padLeft = (side - mutable.width) / 2f
+        val padTop = (side - mutable.height) / 2f
+
+        landmarks.forEach { landmark ->
+            val x = (landmark.xPx * sideScale) - padLeft
+            val y = (landmark.yPx * sideScale) - padTop
+            val paint = if (landmark.visibility > VISIBILITY_THRESHOLD) pointPaint else lowConfidencePaint
+            canvas.drawCircle(x, y, 4f, paint)
+        }
+
+        outputFile.outputStream().use { stream ->
+            mutable.compress(Bitmap.CompressFormat.PNG, 100, stream)
+        }
+        mutable.recycle()
+
+        return elapsedMs(startNs)
+    }
+
+    private fun sanitizeFileStem(fileName: String): String {
+        val stem = fileName.substringBeforeLast('.', fileName)
+        val sanitized = stem.replace(NON_FILE_STEM_CHARS_REGEX, "_")
+        return sanitized.ifBlank { "frame" }
     }
 
     private fun discoverModelAssets(): List<String> {
@@ -339,6 +724,32 @@ class CameraViewModel(
         }
     }
 
+    private fun timestampForFileName(): String =
+        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+    private fun timestampForCsv(): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+
+    private fun sanitizeCsv(value: String): String =
+        value.replace(',', ';').replace('\n', ' ').replace('\r', ' ')
+
+    private fun formatDouble(value: Double): String = String.format(Locale.US, "%.3f", value)
+
+    private fun percentile(values: List<Double>, percentile: Double): Double {
+        if (values.isEmpty()) return 0.0
+        val sorted = values.sorted()
+        val index = floor((sorted.size - 1) * percentile).toInt().coerceIn(0, sorted.lastIndex)
+        return sorted[index]
+    }
+
+    private fun elapsedMs(startNs: Long): Double = (System.nanoTime() - startNs) / 1_000_000.0
+
+    private fun formatGate(inferenceP95: Double): String = when {
+        inferenceP95 <= 50.0 -> "PASS_STRONG"
+        inferenceP95 <= 70.0 -> "PASS_MARGINAL"
+        else -> "FAIL_CONFIG_D"
+    }
+
     private fun readThermalStatus(): String {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return "UNKNOWN"
@@ -359,6 +770,13 @@ class CameraViewModel(
 
     companion object {
         private const val DEFAULT_MODEL_ASSET_PATH = "yolov8n_saved_model/yolov8n_float16.tflite"
+        private const val POSE_MODEL_ASSET_PATH = "pose_landmarks_detector.tflite"
+        private const val POSE_OUTPUT_FOLDER_NAME = "pose_validation"
+        private const val POSE_RUN_TAG = "CVPoseDay5"
+        private const val VISIBILITY_THRESHOLD = 0.6f
+        private const val POSE_VALIDATION_CSV_HEADER =
+            "timestamp,file,yolo_preprocess_ms,yolo_inference_ms,yolo_nms_ms,pose_crop_ms,pose_preprocess_ms,pose_inference_ms,pose_postprocess_ms,frame_total_ms,overlay_write_ms,pose_presence,visible_joints_33,decoded_landmarks_39,status,error"
+        private val NON_FILE_STEM_CHARS_REGEX = Regex("[^A-Za-z0-9._-]")
 
         @Volatile
         internal var testOverrides: TestOverrides? = null
@@ -371,6 +789,17 @@ class CameraViewModel(
         val modelPaths: List<String>? = null,
         val initialModelPath: String? = null,
         val gpuProbeResult: GpuProbeResult? = null,
-        val nnApiProbeResult: String? = null
+        val nnApiProbeResult: String? = null,
+        val poseOutputRootProvider: (() -> File?)? = null
+    )
+
+    private data class PoseValidationSource(
+        val uri: Uri,
+        val displayName: String
+    )
+
+    private data class PoseValidationInput(
+        val source: PoseValidationSource,
+        val bitmap: Bitmap
     )
 }

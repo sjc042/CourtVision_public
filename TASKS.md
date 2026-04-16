@@ -1,96 +1,69 @@
-﻿# Tasks 🔲 Phase 0 Spike
+﻿# Tasks — Phase 0 Spike
 
-Last updated: 2026-04-02
+Last updated: 2026-04-14
 
 ## Active branch
-'spike/day4-kalman-tracker' (branch from `main`)
+`spike/day5-pose-isolated` (branch from `main`)
+
+> Days 1–4 complete. See archived plans: `docs/plans/day1-2-plan.md`, `docs/plans/day3+weekend-plan.md`, `docs/plans/day4_kalman-filter-tracker.md`.
 
 ---
 
-## Completed 🔲 Day 3 (2026-03-28)
+## Active 🔲 Day 5: Pose Landmark Model — Isolated Validation
 
-All Day 3 goals achieved and committed. See `docs/plans/day3+weekend-plan.md` Part 1.
+> Branch: `spike/day5-pose-isolated`
+> Plan: `docs/phase0-spike-plan.md` (Day 5 section)
+> Architecture: `docs/decisions/005-sequential-gpu-inference-pipeline.md`
 
-1. ✅ Export COCO-pretrained YOLOv8n `.pt` weights to TFLite FP16, plug into CameraX inference loop
-2. ✅ Implement UI toggle for CPU vs GPU inference
-3. ✅ Add pre-session model selector UI; lock after first inference frame
-4. ✅ Render live bounding boxes on overlay with post-NMS class whitelist
-5. ✅ Measure per-frame inference latency, FPS, RAM, thermal over 10 min; log `model_used` to CSV
-6. ✅ Support end-to-end YOLO models (NMS built-in) alongside standard YOLO (external NMS)
-7. ✅ Switch to TFLite Support Library preprocessing (`ImageProcessor` + `TensorImage`) 🔲 ~3Ã— faster than manual Bitmap path
-8. ✅ On-device preprocessing and parsing latency benchmarks
+### Completed ✅
+1. ✅ Extract `pose_landmarks_detector.tflite` from MediaPipe `.task` bundle (build-time step; document in build README) — **lite variant** (`pose_landmarker_lite.task`, ~4 MB FP16)
+2. ✅ `PoseLandmarks.kt` — data classes (`PoseImageLandmark`, `PoseWorldLandmark`, `PoseResult`) and `PoseTensorContract` constants
+3. ✅ `PoseLandmarkInterpreter.kt` — shape-based output index resolution, sigmoid decode, TFLite Support Library preprocessing (ResizeOp + NormalizeOp), stage latency timing (pre/inf/post/total)
+4. ✅ `FrameProcessor.kt` — dormant `poseInterpreter` field initialized on `consumerDispatcher` via `initializePoseInterpreterIfNeeded()`
+5. ✅ `PoseLandmarkInterpreterTest.kt` — 7 JVM unit tests: decode (195→39×5, 117→39×3), take(33) subsetting, sigmoid direction, shape-based index resolution + out-of-order, resolution failure, input validation
 
-## Completed ✅ Weekend Track (2026-03-29 ✅ 2026-03-30)
+### Required before validation run 🔲
+6. ✅ Migrate validation runner to `consumerDispatcher` integration
+   - **Old:** `CameraViewModel.runDay5PoseIsolatedValidation()` on separate `poseValidationDispatcher`; new `PoseLandmarkInterpreter` constructed inside runner; reads via raw `File` I/O from `/sdcard/Download/pose_isolate`
+   - **New:** `FrameProcessor.submitPoseValidationBatch(bitmaps)` enqueues into `poseValidationQueue`; `processImage()` pops one bitmap per frame after YOLO; results emitted to `poseValidationResultChannel`
+   - See revised Step 3.5 in `docs/plans/day5-pose-isolated.md`
+7. ✅ Replace image input with system media picker
+   - **Old:** Raw `File` I/O to `/sdcard/Download/` — broken on `targetSdk=34`; manifest declares only `CAMERA`
+   - **New:** SAF/ContentResolver multi-select picker; bitmaps decoded on `Dispatchers.IO`; submitted to `FrameProcessor`
+8. ✅ Add `worldLandmarkVisibility(index: Int)` accessor to `PoseResult` — Blocker B1, required before Day 6 angle-gating code
+9. ✅ Add `useGpu: Boolean = true` parameter to `PoseLandmarkInterpreter` constructor — Blocker B2, required for ADR-005 Config D CPU fallback
+10. ✅ Pull forward `squarePadCrop()` + tests from Day 6
+    - **Why now:** Picker-based validation feeds arbitrary-aspect photos; without letter-box padding the model skews landmarks on tall/wide inputs.
+    - **Implementation:** Added bbox-agnostic `squarePadCrop(source)` for Day 5 full-frame validation; Day 6 will crop YOLO person bbox upstream, then reuse the same function.
 
-1. ✅ Collect basketball datasets from Roboflow (3 sources combined)
-2. ✅ Clean duplicates (exact match dedup across and within splits)
-3. ✅ Train YOLOv8n at 640/480/320 🔲 50 epochs each
+### Validation gates ✅
+11. ✅ Verify two `GpuDelegate` interpreters (YOLO + pose) coexist on `consumerDispatcher` — ADR-005 Verification Gate §1
+    - Result: PASS on S22+ (`SM-S906U1`) with no runtime `TfLiteGpuDelegate ... must run on the same thread` log observed during validation run
+12. ✅ Benchmark sequential YOLO+pose inference on S22+
+    - **Old:** Isolated pose latency (YOLO not running)
+    - **New:** YOLO-warm sequential; gate applies to `pose_inference_ms` p95 column (≤50ms strong pass, ≤70ms marginal, >70ms → Config D)
+    - Result: `pose_inference_p95_ms=10.774` (**PASS_STRONG**) from `benchmarks/phase0/pose_validation/inference_20260414_004536/day5_pose_summary.txt`
+    - Artifacts committed under: `benchmarks/phase0/pose_validation/inference_20260414_004536/`
+13. ✅ Verify decoded landmarks visually on selected test frames (≥8/10 plausible positions — Gate §2)
+    - Result: PASS (manual review confirmed plausibility threshold met)
+14. ✅ Record EGL context sharing result (shared vs. separate) in `CONTEXT.md`
 
-### Dataset
+### Deferred to Day 6 🔲
+15. 🔲 Align `PoseLandmarkInterpreterTest` to JUnit 5 (`org.junit.jupiter.api.Test`, `assertThrows<T> { }`) — currently uses JUnit 4 APIs; CONTEXT.md specifies JUnit 5
+16. 🔲 Update `processImage()` bitmap lifecycle: defer `bitmap.recycle()` to after `squarePadCrop()`; add `personCrop.recycle()` after pose `ImageProcessor.process()`
+    - **Note:** Validation path now recycles the padded intermediate crop in `processPoseValidationIfNeeded()`. Day 6 live camera path still needs the deferred outer `bitmap.recycle()` shift.
+17. ⚠️ **Risk** — `FrameProcessorTest` accesses `poseValidationActive`/`poseValidationComplete` via reflection (`getDeclaredField` + `isAccessible = true`). If Day 6 refactors these fields to `StateFlow<Boolean>` on `FrameProcessorGateway` (required for ViewModel observation), the reflection-based assertions will fail at runtime with `NoSuchFieldException` — no compile-time warning. Fix: replace with StateFlow assertions on the Gateway interface before the StateFlow refactor lands.
+18. 🔲 Wire pose interpreter GPU/CPU mode through `InferenceMode` selection — `initializePoseInterpreterIfNeeded()` currently hardcodes `useGpu = true`; Day 6 must pass the selected mode (GPU or Config D CPU fallback) so pose delegate matches the YOLO delegate choice. Requires Blocker B2 (`useGpu` parameter, already done) and the same `CompatibilityList.bestOptionsForThisDevice` path used by `switchInterpreter`.
+19. 🔲 Replace `getPixels` pixel-copy loop in `PoseLandmarkInterpreter.infer()` with a pre-allocated `Canvas` rescale — **§4 No-alloc gate**
+    - **Current:** `crop256.getPixels(pixels, ...)` allocates a new `IntArray(256 * 256)` on every inference call
+    - **Fix:** pre-allocate a `Canvas`-backed `Bitmap` (ARGB_8888, 256×256) in `init`; use `Canvas.drawBitmap(src, null, dstRect, null)` + `ByteBuffer.rewind()` to fill the existing `inputBuffer` in-place; alternatively keep TFLite Support Library `ImageProcessor` path if benchmarks confirm it avoids the allocation
+    - **Gate:** no `IntArray` or `Bitmap` allocation on the hot path inside `infer()` (verify with Android Studio Profiler before merging Day 6 live wiring)
 
-| Property | Value |
-|----------|-------|
-| Source | Combined: `MathieuLec` + `OwnProjects` + `test-datset` |
-| Format | YOLOv8 (`.txt` annotations) |
-| Classes (nc=5) | `ball`, `made`, `person`, `rim`, `shoot` |
-| Train | 13,578 images |
-| Valid | 866 images |
-| Test | 1,412 images |
-| **Total** | **15,856 images** |
-| Location | `D:\Basketball Datasets\BasketBall.v1i.MathieuLec+OwnProjects+test-datset.yolo26` |
-
-### Training Results (50 epochs each)
-| Model | Input Size | mAP50 | mAP50-95 | Notes |
-|-------|-----------|-------|----------|-------|
-| yolov8n | 640x640 | 0.94006 | 0.73543 | |
-| yolov8n | 480x480 | 0.93476 | 0.72150 | |
-| yolov8n | 320x320 | 0.89546 | 0.66649 | |
-| yolo11n | 640x640 | 0.93473 | 0.74061 | |
-| yolo11n | 480x480 | 0.93375 | 0.73111 | |
-| yolo11n | 320x320 | 0.90842 | 0.67137 | |
-| yolov8s | 640×640 | 0.94244 | 0.76115 | |
-
-### Remaining Training
-
-| Model | Input Size | Status |
-|-------|-----------|--------|
-| yolov8s | 640 / 480 / 320 | Pending |
-| yolov11s | 640 / 480 / 320 | Pending |
+**Device:** Samsung Galaxy S22+ (only available device). Pixel 6 and A54 deferred — validate before Phase 2.
+**Gate:** `pose_inference_ms` p95 ≤ 50ms on S22+ (strong pass); 50–70ms = marginal (flag A54 risk); > 70ms → Config D fallback.
+**Fallback:** Config D — pose on CPU, 4 threads (see ADR-005 §Deferred). Requires Blocker B2 (`useGpu=false`) first.
 
 ---
 
-## Active Post-Weekend / Day 4 Prep (user)
-
-1. ✅ Benchmarked manual vs Support Library preprocessing; switched to Support Library (~3Ã— faster, resolution-independent ~19ms p50)
-2. 🔲 Complete remaining training matrix (yolov8s, yolov11n, yolov11s at 3 resolutions)
-3. 🔲 Export best model(s) to TFLite FP16, drop into Android `assets/`
-4. 🔲 Run Day 3 benchmark loop with custom-trained model 🔲 validate detection quality on-device
-5. 🔲 Update planning docs to reflect 5-class model, dataset details, and training results (in progress)
-
-## Active 🔲 Day 4: Kalman Tracker
-
-> Branch: 'spike/day4-kalman-tracker'
-> Plan: `./docs/plans/day4_kalman-filter-tracker.md`
-
-1. ✅ Add `TrackedBall` data class + extend `DetectionFrame` in `FrameContracts.kt`
-2. ✅ Implement `KalmanBallTracker.kt` - pure Kotlin, constant-velocity 4-state, `maxMissFrames` configurable at runtime
-3. ✅ Integrate tracker into `FrameProcessor.kt` - predict+update after each NMS pass, real `dt` from frame timestamps
-4. ✅ Propagate `trackedBall` through `CameraUiState` + `CameraViewModel`; add `setTrackerMaxMissFrames()` setter
-5. ✅ Add miss-frame slider (range 1-30, default 10) to debug controls in `CameraScreen.kt`
-6. ✅ Draw cyan tracker circle + velocity vector on canvas overlay in `CameraScreen.kt`
-7. ✅ Extend CSV logging with `tracking_active, track_cx, track_cy, track_vx, track_vy, miss_streak`
-8. ✅ Write `docs/decisions/003-kalman-ball-tracker.md` (ADR-003)
-9. ✅ Write `KalmanBallTrackerTest` unit tests
-10. ✅ On-device validation: 10-shot sequence, confirm smooth trajectory in exported CSV
-
-## Out of scope (still)
-- Pose estimation (Day 5)
+## Out of scope
 - Shot detection FSM (Day 7)
-
-## Added - NNAPI Delegate Mode (2026-04-01)
-
-1. Added `InferenceMode.NNAPI` with runtime switching and CPU fallback on delegate init failure
-2. Added NNAPI probe visibility in debug overlay and mode selector gating
-3. Added unit tests covering NNAPI probe state and CSV serialization of `delegate_mode=NNAPI`
-4. Phase 0 choice: GPU/NNAPI probes run synchronously in `CameraViewModel.init`
-5. Phase 2 note: move both delegate probes to `Dispatchers.Default`

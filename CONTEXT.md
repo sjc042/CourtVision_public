@@ -46,7 +46,7 @@ CameraX â†’ YOLO (5-class) â†’ Kalman tracker â†’ shot state mach
 
 > Full spike plan: [docs/phase0-spike-plan.md](docs/phase0-spike-plan.md)
 
-**Progress:** Days 1â€“3 complete. Weekend training track complete (YOLOv8n trained at 640/480/320). Day 4 (Kalman tracker) in progress - implementation underway (core tracking + dual CSV logging integrated).
+**Progress:** Days 1â€“4 complete. Day 5 pose isolated validation gates passed on S22+ (SM-S906U1): EGL/thread check passed, visual plausibility gate passed, and pose p95 inference at 10.774ms (PASS_STRONG).
 
 ### Day 8 Gate Criteria (all must pass)
 - [ ] Ball detection latency < 100ms (p95 < 140ms)
@@ -55,6 +55,16 @@ CameraX â†’ YOLO (5-class) â†’ Kalman tracker â†’ shot state mach
 - [ ] End-to-end FPS â‰¥ 20 sustained for 10 min (target 30)
 - [ ] Shot detection stable across Tripod and Ground modes
 - Benchmark results committed to `/benchmarks/phase0/`
+
+### Day 5 Validation Snapshot (2026-04-14)
+- Device: `SM-S906U1`
+- Mode: `sequential_yolo_warm`, `gpu_mode=GPU`
+- Gate Â§1 (EGL/thread): PASS (no `TfLiteGpuDelegate ... must run on the same thread` runtime log observed)
+- Gate Â§2 (visual plausibility): PASS (manual check >= 8/10)
+- Gate Â§3 (latency): PASS_STRONG (`pose_inference_p95_ms=10.774`)
+- Artifacts:
+  - `benchmarks/phase0/pose_validation/inference_20260414_004536/day5_pose_summary.txt`
+  - `benchmarks/phase0/pose_validation/inference_20260414_004536/day5_pose_validation.csv`
 
 ### Phase 0 Out of Scope
 UI design Â· user accounts Â· cloud backend Â· AR court mapping Â· freemium/paywall Â·
@@ -85,7 +95,7 @@ analytics pipeline Â· session history storage
 | Architecture      | MVVM + Clean Architecture          | Android Architecture Components               |
 | DI Framework      | Hilt (Dagger)                      | 2.x                                           |
 | Camera            | CameraX                            | Jetpack â€” API 21+                             |
-| Pose Estimation   | MediaPipe Pose Landmarker (alt: YOLO26n-pose) | 0.10.x â€” 33 landmarks, 30fps           |
+| Pose Estimation   | `pose_landmarks_detector.tflite` (standalone TFLite `Interpreter`, GPU delegate) â€” see ADR-005 | **Lite variant** extracted from `pose_landmarker_lite.task`; 33 WorldLandmarks; not via PoseLandmarker task API |
 | Object Detection  | TFLite YOLOv8n FP16 (alt: YOLO26n) | 5-class model: `ball`, `made`, `person`, `rim`, `shoot` |
 | AR / Spatial      | ARCore                             | Ground plane + anchors (Phase 3)              |
 | Computer Vision   | OpenCV Android                     | 4.x â€” corner/line detection, homography       |
@@ -106,7 +116,7 @@ UI Layer          â†’ Jetpack Compose screens, ViewModels, UI state (StateF
 Domain Layer      â†’ Use cases, business logic, shot detection algorithms
                    NO Android imports allowed in this layer
 Data Layer        â†’ Room DB, file storage, optional cloud sync Repository
-ML / CV Layer     â†’ CameraX feed, MediaPipe, TFLite detector, ARCore
+ML / CV Layer     â†’ CameraX feed, TFLite YOLO detector, pose_landmarks_detector.tflite (sequential GPU, ADR-005), ARCore
 ```
 
 **Layer rules (enforce these in every review):**
@@ -123,7 +133,7 @@ ML / CV Layer     â†’ CameraX feed, MediaPipe, TFLite detector, ARCore
 :feature:capture      â€” Camera session, capture mode switching, live overlay
 :feature:analytics    â€” Heatmap, session review, shot timeline
 :feature:history      â€” Session list, drill history, progress charts
-:core:ml              â€” MediaPipe wrapper, TFLite YOLOv8n multi-class detector
+:core:ml              â€” TFLite YOLOv8n multi-class detector, pose_landmarks_detector.tflite interpreter (ADR-005)
 :core:ar              â€” ARCore ground plane, homography, court mapper
 :core:data            â€” Room entities, DAOs, Repository interfaces
 :core:domain          â€” Use cases, models, ShotMetrics data classes
@@ -158,7 +168,7 @@ IDLE â†’ PREP (knee bend + ball held)
 ### Thread Safety Rules (critical â€” AI often gets this wrong)
 - All inference runs on `Dispatchers.Default` or a dedicated `ExecutorService` â€” never Main
 - `TFLiteInterpreter` is NOT thread-safe â€” never share instances across coroutines
-- `PoseLandmarker` is NOT thread-safe â€” same rule
+- `pose_landmarks_detector.tflite` `Interpreter` is NOT thread-safe â€” same rule (loaded directly, not via PoseLandmarker task API; see ADR-005)
 - No object allocation inside `ImageAnalysis.Analyzer.analyze()` â€” pre-allocate
 
 ---
