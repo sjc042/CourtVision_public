@@ -1,9 +1,9 @@
 package com.courtvision.spike.pipeline
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Assert.assertThrows
-import org.junit.Test
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.tensorflow.lite.DataType
 
 class PoseLandmarkInterpreterTest {
@@ -74,14 +74,14 @@ class PoseLandmarkInterpreterTest {
             intArrayOf(1, 64, 64, 39)
         )
 
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows<IllegalArgumentException> {
             PoseLandmarkInterpreter.resolveOutputIndices(outputShapes)
         }
     }
 
     @Test
     fun validateInputTensor_throwsOnWrongShape() {
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows<IllegalArgumentException> {
             PoseLandmarkInterpreter.validateInputTensor(
                 inputShape = intArrayOf(1, 224, 224, 3),
                 inputType = DataType.FLOAT32
@@ -152,7 +152,7 @@ class PoseLandmarkInterpreterTest {
             latency = PoseStageLatency(0.0, 0.0, 0.0, 0.0)
         )
 
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows<IllegalArgumentException> {
             result.worldLandmarkVisibility(PoseTensorContract.LANDMARKS_CANONICAL)
         }
     }

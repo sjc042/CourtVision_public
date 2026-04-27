@@ -142,6 +142,7 @@ Run tests scoped to the package you changed:
 ```
 ./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.*"
 ./gradlew testDebugUnitTest --tests "com.courtvision.spike.pipeline.*"
+./gradlew connectedDebugAndroidTest
 ```
 
 Or a single test class/method:
@@ -149,6 +150,7 @@ Or a single test class/method:
 ```
 ./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.CameraViewModelTest"
 ./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.CameraViewModelTest.setModel_resetsInterpreterAndClearsStaleUiState"
+
 ```
 
 #### Full local validation — before pushing

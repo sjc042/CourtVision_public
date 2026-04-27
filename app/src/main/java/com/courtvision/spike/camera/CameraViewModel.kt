@@ -23,6 +23,9 @@ import com.courtvision.spike.pipeline.InferenceMode
 import com.courtvision.spike.pipeline.NnApiDelegateProbe
 import com.courtvision.spike.pipeline.PerformanceCsvLogger
 import com.courtvision.spike.pipeline.PerformanceLogger
+import com.courtvision.spike.pipeline.PerFramePerfCsvLogger
+import com.courtvision.spike.pipeline.PerFramePerfLogger
+import com.courtvision.spike.pipeline.PerFramePerfRow
 import com.courtvision.spike.pipeline.PoseFrameResult
 import com.courtvision.spike.pipeline.PoseImageLandmark
 import com.courtvision.spike.pipeline.PoseTensorContract
@@ -61,17 +64,38 @@ class CameraViewModel(
             ?.takeIf { availableModelPaths.contains(it) }
             ?: chooseInitialModel(availableModelPaths)
 
+    private val performanceLogger: PerformanceLogger =
+        overrides?.performanceLogger ?: PerformanceCsvLogger(application)
+    private val trackingLogger: TrackingLogger =
+        overrides?.trackingLogger ?: TrackingCsvLogger(application)
+    private val perFramePerfLogger: PerFramePerfLogger =
+        overrides?.perFramePerfLogger ?: if (overrides != null) {
+            NoOpPerFramePerfLogger
+        } else {
+            PerFramePerfCsvLogger(application)
+        }
+    private val powerManager: PowerManager? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            application.getSystemService(PowerManager::class.java)
+        } else {
+            null
+        }
     private val frameProcessor: FrameProcessorGateway =
         overrides?.frameProcessor ?: FrameProcessor(
             scope = viewModelScope,
             modelBufferProvider = ::loadModelBuffer,
             poseModelBufferProvider = ::loadPoseModelBuffer,
-            thermalStatusProvider = ::readThermalStatus
+            thermalStatusProvider = {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    "UNKNOWN"
+                } else {
+                    mapThermalStatus(powerManager?.currentThermalStatus)
+                }
+            },
+            perFrameLogger = perFramePerfLogger,
+            perFrameMode = PER_FRAME_MODE,
+            perFrameDevice = Build.MODEL
         )
-    private val performanceLogger: PerformanceLogger =
-        overrides?.performanceLogger ?: PerformanceCsvLogger(application)
-    private val trackingLogger: TrackingLogger =
-        overrides?.trackingLogger ?: TrackingCsvLogger(application)
 
     private val _uiState = MutableStateFlow(
         CameraUiState(
@@ -144,6 +168,18 @@ class CameraViewModel(
                         delegateMode = _uiState.value.selectedMode,
                         modelUsed = selectedModelPath
                     )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            frameProcessor.poseResult.collect { overlay ->
+                _uiState.update { state ->
+                    if (state.modelConfirmed) {
+                        state.copy(poseOverlay = overlay)
+                    } else {
+                        state.copy(poseOverlay = null)
+                    }
                 }
             }
         }
@@ -270,6 +306,7 @@ class CameraViewModel(
             it.copy(
                 selectedModel = modelPath,
                 detectionFrame = DetectionFrame(),
+                poseOverlay = null,
                 lastError = null
             )
         }
@@ -294,6 +331,7 @@ class CameraViewModel(
             state.copy(
                 modelConfirmed = false,
                 detectionFrame = DetectionFrame(),
+                poseOverlay = null,
                 isSwitchingMode = false,
                 poseValidationRunning = false,
                 poseValidationStatus = "IDLE",
@@ -389,6 +427,7 @@ class CameraViewModel(
         poseValidationCollectorJob?.cancel()
         performanceLogger.close()
         trackingLogger.close()
+        perFramePerfLogger.close()
         frameProcessor.shutdown()
         super.onCleared()
     }
@@ -754,9 +793,11 @@ class CameraViewModel(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return "UNKNOWN"
         }
-        val powerManager = getApplication<Application>().getSystemService(PowerManager::class.java)
-            ?: return "UNKNOWN"
-        return when (powerManager.currentThermalStatus) {
+        return mapThermalStatus(powerManager?.currentThermalStatus)
+    }
+
+    private fun mapThermalStatus(thermalStatus: Int?): String {
+        return when (thermalStatus) {
             PowerManager.THERMAL_STATUS_NONE -> "NONE"
             PowerManager.THERMAL_STATUS_LIGHT -> "LIGHT"
             PowerManager.THERMAL_STATUS_MODERATE -> "MODERATE"
@@ -768,12 +809,21 @@ class CameraViewModel(
         }
     }
 
+    private object NoOpPerFramePerfLogger : PerFramePerfLogger {
+        override val filePath: String = ""
+
+        override fun append(row: PerFramePerfRow) = Unit
+
+        override fun close() = Unit
+    }
+
     companion object {
-        private const val DEFAULT_MODEL_ASSET_PATH = "yolov8n_saved_model/yolov8n_float16.tflite"
+        private const val DEFAULT_MODEL_ASSET_PATH = "yolo11n_640_5-class_04-01-2026_saved_model/yolo11n_640_5-class_04-01-2026_float16.tflite"
         private const val POSE_MODEL_ASSET_PATH = "pose_landmarks_detector.tflite"
         private const val POSE_OUTPUT_FOLDER_NAME = "pose_validation"
         private const val POSE_RUN_TAG = "CVPoseDay5"
         private const val VISIBILITY_THRESHOLD = 0.6f
+        private const val PER_FRAME_MODE = "sequential_yolo_pose"
         private const val POSE_VALIDATION_CSV_HEADER =
             "timestamp,file,yolo_preprocess_ms,yolo_inference_ms,yolo_nms_ms,pose_crop_ms,pose_preprocess_ms,pose_inference_ms,pose_postprocess_ms,frame_total_ms,overlay_write_ms,pose_presence,visible_joints_33,decoded_landmarks_39,status,error"
         private val NON_FILE_STEM_CHARS_REGEX = Regex("[^A-Za-z0-9._-]")
@@ -786,6 +836,7 @@ class CameraViewModel(
         val frameProcessor: FrameProcessorGateway? = null,
         val performanceLogger: PerformanceLogger? = null,
         val trackingLogger: TrackingLogger? = null,
+        val perFramePerfLogger: PerFramePerfLogger? = null,
         val modelPaths: List<String>? = null,
         val initialModelPath: String? = null,
         val gpuProbeResult: GpuProbeResult? = null,

@@ -4,10 +4,16 @@ On every session start, read these files before doing anything else:
 - CONTEXT.md
 - TASKS.md
 
+## When writing new code
+- Follow the coding style guide at ./docs/coding-style-guide.md
+
 ## Your role
 - Architecture review and ADR decisions
 - Code review: MVVM compliance, coroutine scoping, thread safety
 - Documentation and planning
+
+## Documentation and planning
+- Plan files (`docs/plans/`) must not reference `TASKS.md` — it is temporary task tracking and will be archived. Any constraint, risk, or context worth recording belongs in the plan doc itself.
 
 ## What to leave alone
 - Do not introduce new dependencies without flagging it

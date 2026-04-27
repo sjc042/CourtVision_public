@@ -45,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -61,9 +62,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.courtvision.spike.pipeline.DetectionFrame
 import com.courtvision.spike.pipeline.InferenceMode
+import com.courtvision.spike.pipeline.LivePoseOverlay
+import com.courtvision.spike.pipeline.PoseTensorContract
 import com.courtvision.spike.pipeline.RotationStallState
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.log10
@@ -108,6 +112,31 @@ fun CameraScreen(
         return
     }
 
+    var detectionOverlayLagMs by remember { mutableStateOf(0.0) }
+    var poseOverlayLagMs by remember { mutableStateOf(0.0) }
+
+    LaunchedEffect(uiState.detectionFrame.emitElapsedRealtimeNanos) {
+        val emitNs = uiState.detectionFrame.emitElapsedRealtimeNanos
+        if (emitNs > 0L) {
+            withFrameNanos { frameNs ->
+                detectionOverlayLagMs = (frameNs - emitNs) / 1_000_000.0
+            }
+        } else {
+            detectionOverlayLagMs = 0.0
+        }
+    }
+
+    LaunchedEffect(uiState.poseOverlay?.emitElapsedRealtimeNanos) {
+        val emitNs = uiState.poseOverlay?.emitElapsedRealtimeNanos ?: 0L
+        if (emitNs > 0L) {
+            withFrameNanos { frameNs ->
+                poseOverlayLagMs = (frameNs - emitNs) / 1_000_000.0
+            }
+        } else {
+            poseOverlayLagMs = 0.0
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         CameraPreview(
             viewModel = viewModel,
@@ -117,8 +146,16 @@ fun CameraScreen(
             detectionFrame = uiState.detectionFrame,
             modifier = Modifier.fillMaxSize()
         )
+        PoseOverlay(
+            overlay = uiState.poseOverlay,
+            sourceWidth = uiState.detectionFrame.sourceWidth,
+            sourceHeight = uiState.detectionFrame.sourceHeight,
+            modifier = Modifier.fillMaxSize()
+        )
         MetricsOverlay(
             uiState = uiState,
+            detectionOverlayLagMs = detectionOverlayLagMs,
+            poseOverlayLagMs = poseOverlayLagMs,
             onModeSelect = viewModel::setInferenceMode,
             onTrackerMissFramesChanged = viewModel::setTrackerMaxMissFrames,
             onTrackerNoiseChanged = viewModel::setTrackerNoise,
@@ -334,8 +371,8 @@ private fun DetectionOverlay(
         val canvasW = size.width
         val canvasH = size.height
 
-        // FrameProcessor pre-applies rotation via Rot90Op before inference, so sourceWidth/Height
-        // are already in display orientation (e.g. portrait: 720Ã—1280). rotationDegrees is always 0.
+        // FrameProcessor pre-rotates sensor frames before YOLO and pose, so sourceWidth/Height
+        // are already in display orientation and rotationDegrees is always 0.
         val effectiveSrcW = detectionFrame.sourceWidth.toFloat()
         val effectiveSrcH = detectionFrame.sourceHeight.toFloat()
 
@@ -359,11 +396,11 @@ private fun DetectionOverlay(
             val bottom = displayBox.bottom * scaledH - offsetY
 
             val boxColor = when (displayBox.classId) {
-                0 -> Color(0xFFFF6F00)  // ball â†’ orange
-                1 -> Color(0xFF43A047)  // made â†’ green
-                2 -> Color(0xFF1E88E5)  // person â†’ blue
-                3 -> Color(0xFFFFD600)  // rim â†’ yellow
-                4 -> Color(0xFFAB47BC)  // shoot â†’ purple
+                0 -> Color(0xFFFF6F00) // ball
+                1 -> Color(0xFF43A047) // made
+                2 -> Color(0xFF1E88E5) // person
+                3 -> Color(0xFFFFD600) // rim
+                4 -> Color(0xFFAB47BC) // shoot
                 else -> Color(0xFFFFFFFF)
             }
 
@@ -415,8 +452,56 @@ private fun DetectionOverlay(
 }
 
 @Composable
+private fun PoseOverlay(
+    overlay: LivePoseOverlay?,
+    sourceWidth: Int,
+    sourceHeight: Int,
+    modifier: Modifier = Modifier
+) {
+    if (overlay == null || sourceWidth <= 0 || sourceHeight <= 0) return
+
+    Canvas(modifier = modifier) {
+        val canvasW = size.width
+        val canvasH = size.height
+        val srcW = sourceWidth.toFloat()
+        val srcH = sourceHeight.toFloat()
+
+        val scale = maxOf(canvasW / srcW, canvasH / srcH)
+        val scaledW = srcW * scale
+        val scaledH = srcH * scale
+        val offsetX = (scaledW - canvasW) / 2f
+        val offsetY = (scaledH - canvasH) / 2f
+
+        val cropRect = overlay.cropRectNormalized
+        val cropW = cropRect.right - cropRect.left
+        val cropH = cropRect.bottom - cropRect.top
+        val inputSize = PoseTensorContract.INPUT_SIZE.toFloat()
+
+        overlay.poseResult.imageLandmarks33.forEach { landmark ->
+            val displayX = cropRect.left + (landmark.xPx / inputSize) * cropW
+            val displayY = cropRect.top + (landmark.yPx / inputSize) * cropH
+            val screenX = displayX * scaledW - offsetX
+            val screenY = displayY * scaledH - offsetY
+            val color = if (landmark.visibility > POSE_VISIBILITY_THRESHOLD) {
+                Color.Green
+            } else {
+                Color.Red
+            }
+
+            drawCircle(
+                color = color,
+                radius = 4.dp.toPx(),
+                center = Offset(screenX, screenY)
+            )
+        }
+    }
+}
+
+@Composable
 private fun MetricsOverlay(
     uiState: CameraUiState,
+    detectionOverlayLagMs: Double = 0.0,
+    poseOverlayLagMs: Double = 0.0,
     onModeSelect: (InferenceMode) -> Unit,
     onTrackerMissFramesChanged: (Int) -> Unit,
     onTrackerNoiseChanged: (Float, Float) -> Unit,
@@ -469,6 +554,16 @@ private fun MetricsOverlay(
         )
         Text(
             "Inference: ${"%.2f".format(uiState.stats.lastInferenceMs)}ms | Mode: ${uiState.stats.delegateMode}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "DET overlay: ${formatOverlayLag(detectionOverlayLagMs)}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "POSE overlay: ${formatOverlayLag(poseOverlayLagMs)}",
             color = Color.White,
             style = MaterialTheme.typography.bodySmall
         )
@@ -713,6 +808,10 @@ private fun shortModelName(modelPath: String): String {
         .replace("_float32", "-fp32")
 }
 
+private fun formatOverlayLag(lagMs: Double): String {
+    return if (lagMs <= 0.0) "—" else String.format(Locale.US, "%.1f ms", lagMs)
+}
+
 @Composable
 private fun PermissionRequired(
     onRequestPermission: () -> Unit
@@ -781,3 +880,4 @@ private const val CV_ROTATION_TAG = "CVRotation"
 private const val ROTATION_DEBUG_LOGS = false
 private const val RECONCILE_TICK_MS = 1_000L
 private const val RECOVERY_REBIND_COOLDOWN_MS = 5_000L
+private const val POSE_VISIBILITY_THRESHOLD = 0.6f

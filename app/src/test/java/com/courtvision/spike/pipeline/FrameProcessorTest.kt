@@ -1,21 +1,32 @@
 package com.courtvision.spike.pipeline
 
+import android.graphics.Bitmap
 import android.graphics.Rect
 import android.media.Image
 import androidx.camera.core.ImageInfo
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.impl.TagBundle
 import androidx.camera.core.impl.utils.ExifData
+import java.io.File
+import java.io.RandomAccessFile
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
+import tech.apter.junit.jupiter.robolectric.RobolectricExtension
 
+@ExtendWith(RobolectricExtension::class)
 class FrameProcessorTest {
 
     @Test
@@ -332,6 +343,204 @@ class FrameProcessorTest {
         }
     }
 
+    @Test
+    fun processImage_liveYoloWithPerson_runsPoseAndEmitsResult() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val fakePose = FakePoseInferenceEngine(cannedPoseResult())
+        val bitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            setPrivateField(processor, "poseInterpreter", fakePose)
+            processor.runLivePoseForTest(bitmap, boxes = listOf(personBox()))
+
+            val overlay = processor.poseResult.value
+            assertNotNull(overlay)
+            assertEquals(33, overlay?.poseResult?.imageLandmarks33?.size)
+            assertTrue((overlay?.cropRectNormalized?.right ?: 0f) > (overlay?.cropRectNormalized?.left ?: 0f))
+            assertTrue(fakePose.inferCalls.get() > 0)
+        } finally {
+            bitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun runLivePoseForTest_emitsLivePoseOverlayWithCropRect() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val fakePose = FakePoseInferenceEngine(cannedPoseResult())
+        val bitmap = Bitmap.createBitmap(400, 600, Bitmap.Config.ARGB_8888)
+
+        try {
+            setPrivateField(processor, "poseInterpreter", fakePose)
+            processor.runLivePoseForTest(bitmap, boxes = listOf(personBox()))
+
+            val overlay = processor.poseResult.value
+            assertNotNull(overlay)
+            assertTrue((overlay?.cropRectNormalized?.left ?: -1f) >= 0f)
+            assertTrue((overlay?.cropRectNormalized?.top ?: -1f) >= 0f)
+            assertTrue((overlay?.cropRectNormalized?.right ?: 2f) <= 1f)
+            assertTrue((overlay?.cropRectNormalized?.bottom ?: 2f) <= 1f)
+        } finally {
+            bitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun processImage_rotation90_sharesRotatedBitmapWithPose() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val fakePose = FakePoseInferenceEngine(cannedPoseResult())
+        val sensorBitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            setPrivateField(processor, "poseInterpreter", fakePose)
+            val rotatedBitmap = rotateBitmapForDisplay(sensorBitmap, 90)
+            try {
+                processor.runLivePoseForTest(rotatedBitmap, boxes = listOf(personBox()))
+            } finally {
+                if (rotatedBitmap !== sensorBitmap) rotatedBitmap.recycle()
+            }
+
+            val rotatedForAssertion = rotateBitmapForDisplay(sensorBitmap, 90)
+            val rotatedWidth = rotatedForAssertion.width
+            val rotatedHeight = rotatedForAssertion.height
+            if (rotatedForAssertion !== sensorBitmap) {
+                rotatedForAssertion.recycle()
+            }
+
+            assertEquals(PoseTensorContract.INPUT_SIZE, fakePose.lastInputWidth.get())
+            assertEquals(PoseTensorContract.INPUT_SIZE, fakePose.lastInputHeight.get())
+            assertEquals(480, rotatedWidth)
+            assertEquals(640, rotatedHeight)
+        } finally {
+            sensorBitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun processImage_liveYoloNoPerson_skipsPoseAndLeavesPoseResultNull() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val fakePose = FakePoseInferenceEngine(cannedPoseResult())
+        val bitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            setPrivateField(processor, "poseInterpreter", fakePose)
+            processor.runLivePoseForTest(bitmap, boxes = listOf(ballBox()))
+
+            assertNull(processor.poseResult.value)
+            assertEquals(0, fakePose.inferCalls.get())
+        } finally {
+            bitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun processImage_bitmapRecycledInOuterFinally_noCrash() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val fakePose = FakePoseInferenceEngine(cannedPoseResult())
+        val firstBitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+        val secondBitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            setPrivateField(processor, "poseInterpreter", fakePose)
+            processor.runLivePoseForTest(firstBitmap, boxes = listOf(personBox()))
+            processor.runLivePoseForTest(secondBitmap, boxes = listOf(personBox()))
+            assertEquals(2, fakePose.inferCalls.get())
+        } finally {
+            firstBitmap.recycle()
+            secondBitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun setPoseGatingMode_FSM_GATED_currentlyFallsBackToEveryFrame() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val fakePose = FakePoseInferenceEngine(cannedPoseResult())
+        val bitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            setPrivateField(processor, "poseInterpreter", fakePose)
+            processor.setPoseGatingMode(PoseGatingMode.FSM_GATED)
+            processor.runLivePoseForTest(bitmap, boxes = listOf(personBox()))
+
+            assertNotNull(processor.poseResult.value)
+            assertTrue(fakePose.inferCalls.get() > 0)
+        } finally {
+            bitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun initializePoseInterpreter_whenYoloGpu_usesGpuDelegate() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val capturedUseGpu = AtomicReference<Boolean?>(null)
+        val factory = { _: MappedByteBuffer, useGpu: Boolean ->
+            capturedUseGpu.set(useGpu)
+            FakePoseInferenceEngine(cannedPoseResult())
+        }
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = null,
+            poseModelBufferProvider = { createMappedByteBuffer() },
+            poseInterpreterFactory = factory,
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            processor.forceCurrentInferenceModeForTest(InferenceMode.GPU)
+            processor.initializePoseInterpreterForTest()
+
+            assertEquals(true, capturedUseGpu.get())
+            assertTrue(processor.hasPoseInterpreterForTest())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun switchInterpreterCpuToGpu_closesAndReinitializesPose() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val created = mutableListOf<FakePoseInferenceEngine>()
+        val factory = { _: MappedByteBuffer, _: Boolean ->
+            FakePoseInferenceEngine(cannedPoseResult()).also { created.add(it) }
+        }
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = null,
+            poseModelBufferProvider = { createMappedByteBuffer() },
+            poseInterpreterFactory = factory,
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            processor.forceCurrentInferenceModeForTest(InferenceMode.CPU)
+            processor.initializePoseInterpreterForTest()
+            val first = created.first()
+
+            processor.switchInterpreterForTest(InferenceMode.GPU)
+            processor.forceCurrentInferenceModeForTest(InferenceMode.GPU)
+            processor.initializePoseInterpreterForTest()
+            val second = created.last()
+
+            assertFalse(first === second)
+            assertTrue(first.closed.get())
+            assertTrue(processor.hasPoseInterpreterForTest())
+            assertSame(second, created.last())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
     private fun frame(id: Int) = FramePacket(
         timestampNs = id.toLong(),
         width = 1280,
@@ -367,6 +576,74 @@ class FrameProcessorTest {
         assertEquals(expected.top, actual.top, 0.0001f)
         assertEquals(expected.right, actual.right, 0.0001f)
         assertEquals(expected.bottom, actual.bottom, 0.0001f)
+    }
+
+    private fun personBox() = DetectionBox(
+        classId = 2,
+        label = "person",
+        confidence = 0.93f,
+        left = 0.25f,
+        top = 0.10f,
+        right = 0.75f,
+        bottom = 0.90f
+    )
+
+    private fun ballBox() = DetectionBox(
+        classId = 0,
+        label = "ball",
+        confidence = 0.84f,
+        left = 0.40f,
+        top = 0.40f,
+        right = 0.50f,
+        bottom = 0.50f
+    )
+
+    private fun cannedPoseResult(): PoseResult {
+        val imageLandmarks = (0 until PoseTensorContract.LANDMARKS_TOTAL).map {
+            PoseImageLandmark(
+                xPx = it.toFloat(),
+                yPx = it.toFloat(),
+                zPx = 0f,
+                visibilityLogit = 1f,
+                presenceLogit = 1f,
+                visibility = 0.9f,
+                presence = 0.95f
+            )
+        }
+        val worldLandmarks = (0 until PoseTensorContract.LANDMARKS_TOTAL).map {
+            PoseWorldLandmark(x = it.toFloat(), y = it.toFloat(), z = 0f)
+        }
+        return PoseResult(
+            imageLandmarks39 = imageLandmarks,
+            worldLandmarks39 = worldLandmarks,
+            imageLandmarks33 = imageLandmarks.take(PoseTensorContract.LANDMARKS_CANONICAL),
+            worldLandmarks33 = worldLandmarks.take(PoseTensorContract.LANDMARKS_CANONICAL),
+            posePresenceLogit = 1.0f,
+            posePresence = 0.73f,
+            latency = PoseStageLatency(
+                preprocessMs = 1.0,
+                inferenceMs = 2.0,
+                postprocessMs = 1.0,
+                totalMs = 4.0
+            )
+        )
+    }
+
+    private fun setPrivateField(instance: Any, fieldName: String, value: Any?) {
+        val field = instance::class.java.getDeclaredField(fieldName)
+        field.isAccessible = true
+        field.set(instance, value)
+    }
+
+    private fun createMappedByteBuffer(): MappedByteBuffer {
+        val file = File.createTempFile("pose_test", ".bin")
+        file.deleteOnExit()
+        RandomAccessFile(file, "rw").use { raf ->
+            raf.setLength(1024)
+            raf.channel.use { channel ->
+                return channel.map(FileChannel.MapMode.READ_ONLY, 0, raf.length())
+            }
+        }
     }
 
     private data class Prediction(
@@ -422,6 +699,26 @@ private class FakeImageProxy : ImageProxy {
     override fun getImageInfo(): ImageInfo = imageInfo
 
     override fun getImage(): Image? = null
+}
+
+private class FakePoseInferenceEngine(
+    private val result: PoseResult
+) : PoseInferenceEngine {
+    val inferCalls = AtomicInteger(0)
+    val closed = AtomicBoolean(false)
+    val lastInputWidth = AtomicInteger(0)
+    val lastInputHeight = AtomicInteger(0)
+
+    override fun infer(cropBitmap: Bitmap): PoseResult {
+        inferCalls.incrementAndGet()
+        lastInputWidth.set(cropBitmap.width)
+        lastInputHeight.set(cropBitmap.height)
+        return result
+    }
+
+    override fun close() {
+        closed.set(true)
+    }
 }
 
 private fun FrameProcessor.publishWindowStatsForTest() {

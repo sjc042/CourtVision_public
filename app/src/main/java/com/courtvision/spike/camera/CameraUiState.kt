@@ -3,6 +3,7 @@ package com.courtvision.spike.camera
 import com.courtvision.spike.pipeline.DetectionFrame
 import com.courtvision.spike.pipeline.GpuProbeResult
 import com.courtvision.spike.pipeline.InferenceMode
+import com.courtvision.spike.pipeline.LivePoseOverlay
 import com.courtvision.spike.pipeline.PipelineStats
 
 enum class CameraStatus {
@@ -28,6 +29,7 @@ data class CameraUiState(
     val selectedMode: InferenceMode = InferenceMode.CPU,
     val isSwitchingMode: Boolean = false,
     val detectionFrame: DetectionFrame = DetectionFrame(),
+    val poseOverlay: LivePoseOverlay? = null,
     val logFilePath: String = "",
     val trackingLogFilePath: String = "",
     val poseValidationRunning: Boolean = false,

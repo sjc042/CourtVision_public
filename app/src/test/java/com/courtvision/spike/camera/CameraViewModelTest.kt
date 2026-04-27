@@ -11,10 +11,19 @@ import com.courtvision.spike.pipeline.FrameProcessorGateway
 import com.courtvision.spike.pipeline.GpuProbeResult
 import com.courtvision.spike.pipeline.GpuStatus
 import com.courtvision.spike.pipeline.InferenceMode
+import com.courtvision.spike.pipeline.LivePoseOverlay
 import com.courtvision.spike.pipeline.PerformanceLogger
 import com.courtvision.spike.pipeline.PipelineStats
+import com.courtvision.spike.pipeline.PersonSelectionMode
+import com.courtvision.spike.pipeline.PoseImageLandmark
 import com.courtvision.spike.pipeline.PoseFrameResult
+import com.courtvision.spike.pipeline.PoseGatingMode
+import com.courtvision.spike.pipeline.PoseResult
+import com.courtvision.spike.pipeline.PoseStageLatency
+import com.courtvision.spike.pipeline.PoseWorldLandmark
+import com.courtvision.spike.pipeline.PoseTensorContract
 import com.courtvision.spike.pipeline.RotationTelemetry
+import com.courtvision.spike.pipeline.CropRectNormalized
 import com.courtvision.spike.pipeline.TrackingLogger
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -25,24 +34,28 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import org.junit.After
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Rule
-import org.junit.Test
-import org.junit.rules.TestWatcher
-import org.junit.runner.Description
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.AfterEachCallback
+import org.junit.jupiter.api.extension.BeforeEachCallback
+import org.junit.jupiter.api.extension.ExtensionContext
+import org.junit.jupiter.api.extension.RegisterExtension
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CameraViewModelTest {
 
-    @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    @JvmField
+    @RegisterExtension
+    val mainDispatcherExtension = MainDispatcherExtension()
 
-    @After
+    @AfterEach
     fun tearDown() {
         CameraViewModel.testOverrides = null
     }
@@ -147,6 +160,51 @@ class CameraViewModelTest {
             assertEquals(true, viewModel.uiState.value.nnApiAvailable)
             assertEquals(InferenceMode.NNAPI, fakeProcessor.lastSetMode)
             assertEquals(InferenceMode.NNAPI, viewModel.uiState.value.selectedMode)
+        } finally {
+            handle.store.clear()
+        }
+    }
+
+    @Test
+    fun uiState_poseOverlay_reflectsGatewayEmissions() = runTest {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            val preConfirmOverlay = sampleOverlay()
+            val postConfirmOverlay = sampleOverlay(
+                cropRect = CropRectNormalized(
+                    left = 0.15f,
+                    top = 0.1f,
+                    right = 0.85f,
+                    bottom = 0.9f
+                )
+            )
+
+            fakeProcessor.emitPoseOverlay(preConfirmOverlay)
+            runCurrent()
+            assertNull(viewModel.uiState.value.poseOverlay)
+
+            viewModel.confirmModel()
+            runCurrent()
+            fakeProcessor.emitPoseOverlay(postConfirmOverlay)
+            runCurrent()
+
+            assertEquals(postConfirmOverlay, viewModel.uiState.value.poseOverlay)
+
+            viewModel.restartSession()
+            runCurrent()
+            assertNull(viewModel.uiState.value.poseOverlay)
         } finally {
             handle.store.clear()
         }
@@ -302,6 +360,43 @@ class CameraViewModelTest {
         return ViewModelHandle(store = store, viewModel = viewModel)
     }
 
+    private fun sampleOverlay(
+        cropRect: CropRectNormalized = CropRectNormalized(
+            left = 0.1f,
+            top = 0.1f,
+            right = 0.8f,
+            bottom = 0.9f
+        )
+    ): LivePoseOverlay {
+        val imageLandmarks = (0 until PoseTensorContract.LANDMARKS_TOTAL).map { index ->
+            PoseImageLandmark(
+                xPx = index.toFloat(),
+                yPx = index.toFloat(),
+                zPx = 0f,
+                visibilityLogit = 1f,
+                presenceLogit = 1f,
+                visibility = 0.9f,
+                presence = 0.95f
+            )
+        }
+        val worldLandmarks = (0 until PoseTensorContract.LANDMARKS_TOTAL).map { index ->
+            PoseWorldLandmark(x = index.toFloat(), y = index.toFloat(), z = 0f)
+        }
+        val result = PoseResult(
+            imageLandmarks39 = imageLandmarks,
+            worldLandmarks39 = worldLandmarks,
+            imageLandmarks33 = imageLandmarks.take(PoseTensorContract.LANDMARKS_CANONICAL),
+            worldLandmarks33 = worldLandmarks.take(PoseTensorContract.LANDMARKS_CANONICAL),
+            posePresenceLogit = 1f,
+            posePresence = 0.73f,
+            latency = PoseStageLatency(1.0, 2.0, 1.0, 4.0)
+        )
+        return LivePoseOverlay(
+            poseResult = result,
+            cropRectNormalized = cropRect
+        )
+    }
+
     private class FakePerformanceLogger : PerformanceLogger {
         override val filePath: String = "/tmp/test-benchmark.csv"
         var closed: Boolean = false
@@ -327,6 +422,7 @@ class CameraViewModelTest {
     private class FakeFrameProcessor : FrameProcessorGateway {
         private val statsFlow = MutableStateFlow(PipelineStats())
         private val detectionsFlow = MutableStateFlow(DetectionFrame())
+        private val poseFlow = MutableStateFlow<LivePoseOverlay?>(null)
         private val switchingFlow = MutableStateFlow(false)
         private val errorFlow = MutableStateFlow<String?>(null)
         private val rotationTelemetryFlow = MutableStateFlow(RotationTelemetry())
@@ -341,6 +437,7 @@ class CameraViewModelTest {
 
         override val stats: StateFlow<PipelineStats> = statsFlow
         override val detections: StateFlow<DetectionFrame> = detectionsFlow
+        override val poseResult: StateFlow<LivePoseOverlay?> = poseFlow
         override val isSwitchingMode: StateFlow<Boolean> = switchingFlow
         override val lastError: StateFlow<String?> = errorFlow
         override val rotationTelemetry: StateFlow<RotationTelemetry> = rotationTelemetryFlow
@@ -358,6 +455,10 @@ class CameraViewModelTest {
             lastSetMode = mode
             statsFlow.value = statsFlow.value.copy(delegateMode = mode)
         }
+
+        override fun setPoseGatingMode(mode: PoseGatingMode) = Unit
+
+        override fun setPersonSelectionMode(mode: PersonSelectionMode) = Unit
 
         override fun setTrackerMaxMissFrames(maxMissFrames: Int) {
             lastSetMaxMissFrames = maxMissFrames
@@ -384,6 +485,10 @@ class CameraViewModelTest {
         }
 
         override fun shutdown() = Unit
+
+        fun emitPoseOverlay(overlay: LivePoseOverlay?) {
+            poseFlow.value = overlay
+        }
     }
 
     private companion object {
@@ -400,14 +505,14 @@ class CameraViewModelTest {
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class MainDispatcherRule(
+class MainDispatcherExtension(
     private val dispatcher: TestDispatcher = UnconfinedTestDispatcher()
-) : TestWatcher() {
-    override fun starting(description: Description) {
+) : BeforeEachCallback, AfterEachCallback {
+    override fun beforeEach(context: ExtensionContext) {
         Dispatchers.setMain(dispatcher)
     }
 
-    override fun finished(description: Description) {
+    override fun afterEach(context: ExtensionContext) {
         Dispatchers.resetMain()
     }
 }

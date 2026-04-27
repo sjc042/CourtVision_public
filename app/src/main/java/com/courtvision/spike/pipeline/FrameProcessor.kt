@@ -3,6 +3,7 @@ package com.courtvision.spike.pipeline
 import android.graphics.Bitmap
 import android.util.Log
 import android.os.SystemClock
+import androidx.annotation.VisibleForTesting
 import androidx.camera.core.ImageProxy
 import java.nio.MappedByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -37,7 +38,6 @@ import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
-import org.tensorflow.lite.support.image.ops.Rot90Op
 
 enum class ModelOutputFormat { RAW_8400, END_TO_END_300 }
 
@@ -45,8 +45,13 @@ class FrameProcessor(
     private val scope: CoroutineScope,
     private val modelBufferProvider: (() -> MappedByteBuffer)? = null,
     private val poseModelBufferProvider: (() -> MappedByteBuffer)? = null,
+    private val poseInterpreterFactory: (MappedByteBuffer, Boolean) -> PoseInferenceEngine =
+        { modelBuffer, useGpu -> PoseLandmarkInterpreter(modelBuffer, useGpu = useGpu) },
     private val consumerDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
-    private val thermalStatusProvider: () -> String = { "UNKNOWN" }
+    private val thermalStatusProvider: () -> String = { "UNKNOWN" },
+    private val perFrameLogger: PerFramePerfLogger? = null,
+    private val perFrameMode: String = "sequential_yolo_pose",
+    private val perFrameDevice: String = "UNKNOWN"
 ) : FrameConsumer, FrameProcessorGateway {
 
     private val droppedByOverflow = AtomicLong(0)
@@ -55,6 +60,9 @@ class FrameProcessor(
     private val windowDurationsMs = ConcurrentLinkedQueue<Double>()
     private val pendingMode = AtomicReference<InferenceMode?>(null)
     private val currentMode = AtomicReference(InferenceMode.CPU)
+    private val poseGatingMode = AtomicReference(PoseGatingMode.EVERY_FRAME_WITH_PERSON)
+    private val personSelectionMode = AtomicReference(PersonSelectionMode.HIGHEST_CONFIDENCE)
+    private val lastFrameSkippedPose = AtomicBoolean(true)
     private val latestTrackedBall = AtomicReference<TrackedBall?>(null)
     private val latestMissStreak = AtomicInteger(0)
     private val expectedTargetRotation = AtomicInteger(-1)
@@ -65,6 +73,7 @@ class FrameProcessor(
     private var lastTrackerTimestampNs: Long = -1L
     private var rotationMismatchStartElapsedMs: Long = -1L
     private var lastRotationStallLogElapsedMs: Long = -1L
+    private val perFrameTimingAccumulator = PerFrameTimingAccumulator()
 
     private val _stats = MutableStateFlow(PipelineStats())
     override val stats: StateFlow<PipelineStats> = _stats.asStateFlow()
@@ -72,6 +81,8 @@ class FrameProcessor(
     private val _detections = MutableStateFlow(DetectionFrame())
     override val detections: StateFlow<DetectionFrame> = _detections.asStateFlow()
 
+    private val _poseResult = MutableStateFlow<LivePoseOverlay?>(null)
+    override val poseResult: StateFlow<LivePoseOverlay?> = _poseResult.asStateFlow()
 
     private val _isSwitchingMode = MutableStateFlow(false)
     override val isSwitchingMode: StateFlow<Boolean> = _isSwitchingMode.asStateFlow()
@@ -87,26 +98,10 @@ class FrameProcessor(
     private val poseValidationResultChannel = Channel<PoseFrameResult>(Channel.UNLIMITED)
     override val poseValidationResults: Flow<PoseFrameResult> = poseValidationResultChannel.receiveAsFlow()
 
-    // Rot90Op takes counter-clockwise 90° rotation count.
-    // CameraX rotationDegrees is clockwise, so:
-    //   0°   → 0 rotations
-    //   90°  → 3 counter-clockwise (= 1 clockwise)
-    //   180° → 2
-    //   270° → 1 counter-clockwise (= 3 clockwise)
-    private val imageProcessors: Map<Int, ImageProcessor> = mapOf(
-        0   to buildImageProcessor(rot90count = 0),
-        90  to buildImageProcessor(rot90count = 3),
-        180 to buildImageProcessor(rot90count = 2),
-        270 to buildImageProcessor(rot90count = 1),
-    )
-
-    private fun buildImageProcessor(rot90count: Int): ImageProcessor {
-        return ImageProcessor.Builder().apply {
-            if (rot90count > 0) add(Rot90Op(rot90count))
-            add(ResizeOp(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, ResizeOp.ResizeMethod.BILINEAR))
-            add(NormalizeOp(0f, 255f))
-        }.build()
-    }
+    private val yoloImageProcessor: ImageProcessor = ImageProcessor.Builder()
+        .add(ResizeOp(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, ResizeOp.ResizeMethod.BILINEAR))
+        .add(NormalizeOp(0f, 255f))
+        .build()
 
     private lateinit var outputTensorRaw: Array<Array<FloatArray>>
     private val outputTensorE2E = Array(1) { Array(E2E_MAX_DETS) { FloatArray(E2E_FIELDS) } }
@@ -115,7 +110,7 @@ class FrameProcessor(
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
-    private var poseInterpreter: PoseLandmarkInterpreter? = null
+    private var poseInterpreter: PoseInferenceEngine? = null
 
     private val frameChannel = Channel<FrameTask>(
         capacity = 1,
@@ -192,6 +187,14 @@ class FrameProcessor(
         }
     }
 
+    override fun setPoseGatingMode(mode: PoseGatingMode) {
+        poseGatingMode.set(mode)
+    }
+
+    override fun setPersonSelectionMode(mode: PersonSelectionMode) {
+        personSelectionMode.set(mode)
+    }
+
     override fun setTrackerMaxMissFrames(maxMissFrames: Int) {
         scope.launch(consumerDispatcher) {
             ballTracker.maxMissFrames = maxMissFrames
@@ -242,16 +245,21 @@ class FrameProcessor(
     override fun resetInterpreter() {
         scope.launch(consumerDispatcher) {
             resetTrackingState()
+            _poseResult.value = null
+            lastFrameSkippedPose.set(true)
             clearPoseValidationQueue(recycleBitmaps = true)
             poseValidationActive.set(false)
             poseValidationComplete.set(false)
             closeInterpreterResources()
+            closePoseResources()
         }
     }
 
     override fun shutdown() {
         frameChannel.close()
         resetTrackingState()
+        _poseResult.value = null
+        lastFrameSkippedPose.set(true)
         clearPoseValidationQueue(recycleBitmaps = true)
         poseValidationActive.set(false)
         poseValidationComplete.set(false)
@@ -265,8 +273,9 @@ class FrameProcessor(
     private fun initializePoseInterpreterIfNeeded() {
         if (poseInterpreter != null) return
         val poseBuffer = poseModelBufferProvider?.invoke() ?: return
+        val useGpu = currentMode.get() != InferenceMode.CPU
         try {
-            poseInterpreter = PoseLandmarkInterpreter(poseBuffer)
+            poseInterpreter = poseInterpreterFactory(poseBuffer, useGpu)
         } catch (error: Throwable) {
             _lastError.value =
                 "Pose interpreter init failed: ${error.message ?: "unknown error"}"
@@ -319,6 +328,7 @@ class FrameProcessor(
 
     private fun switchInterpreter(mode: InferenceMode): Boolean {
         closeInterpreterResources()
+        closePoseResources()
         resetTrackingState()
 
         val mappedModel = modelBufferProvider?.invoke()
@@ -430,6 +440,7 @@ class FrameProcessor(
             initializePoseInterpreterIfNeeded()
             val localInterpreter = interpreter ?: return
             val frameStartNs = System.nanoTime()
+            perFrameTimingAccumulator.reset()
 
             val imageTimestampNs = image.imageInfo.timestamp
             val rotationDegrees = image.imageInfo.rotationDegrees
@@ -471,91 +482,241 @@ class FrameProcessor(
                 lastNormalizedRotation = normalizedRotation
             }
 
-            val bitmap = image.toBitmap()
-            val bitmapW = bitmap.width
-            val bitmapH = bitmap.height
-            val processor = imageProcessors[normalizedRotation] ?: imageProcessors[0]!!
-            val yoloPreprocessStartNs = System.nanoTime()
-            val tensorImage = try {
-                processor.process(TensorImage.fromBitmap(bitmap))
+            val sensorBitmap = image.toBitmap()
+            val rotatedBitmap = rotateBitmapForDisplay(sensorBitmap, normalizedRotation)
+            try {
+                val rotatedWidth = rotatedBitmap.width
+                val rotatedHeight = rotatedBitmap.height
+                val yoloPreprocessStartNs = System.nanoTime()
+                val tensorImage = yoloImageProcessor.process(TensorImage.fromBitmap(rotatedBitmap))
+                val yoloPreprocessMs = elapsedMs(yoloPreprocessStartNs)
+
+                val inputBuffer = tensorImage.buffer
+                val boxes: List<DetectionBox>
+                val yoloInferenceMs: Double
+                val yoloNmsMs: Double
+                when (outputFormat) {
+                    ModelOutputFormat.RAW_8400 -> {
+                        for (row in outputTensorRaw[0]) row.fill(0f)
+                        val yoloInferenceStartNs = System.nanoTime()
+                        localInterpreter.run(inputBuffer, outputTensorRaw)
+                        yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                        val yoloNmsStartNs = System.nanoTime()
+                        boxes = parseModelOutput(outputTensorRaw, CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD)
+                        yoloNmsMs = elapsedMs(yoloNmsStartNs)
+                    }
+                    ModelOutputFormat.END_TO_END_300 -> {
+                        for (row in outputTensorE2E[0]) row.fill(0f)
+                        val yoloInferenceStartNs = System.nanoTime()
+                        localInterpreter.run(inputBuffer, outputTensorE2E)
+                        yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                        val yoloNmsStartNs = System.nanoTime()
+                        boxes = parseEndToEndOutput(outputTensorE2E, CONFIDENCE_THRESHOLD)
+                        yoloNmsMs = elapsedMs(yoloNmsStartNs)
+                    }
+                }
+                lastInferenceMs.set(yoloInferenceMs)
+                var bestBallBox: DetectionBox? = null
+                for (box in boxes) {
+                    if (box.classId != BALL_CLASS_ID) continue
+                    val currentBest = bestBallBox
+                    if (currentBest == null || box.confidence > currentBest.confidence) {
+                        bestBallBox = box
+                    }
+                }
+                val dtSec = trackerDeltaSeconds(imageTimestampNs)
+                val trackedBall = ballTracker.track(
+                    dtSec = dtSec,
+                    measurement = bestBallBox
+                )
+                latestTrackedBall.set(trackedBall.takeIf { it.isTracked })
+                latestMissStreak.set(ballTracker.missFrames)
+                _detections.value = DetectionFrame(
+                    timestampNs = imageTimestampNs,
+                    sourceWidth = rotatedWidth,
+                    sourceHeight = rotatedHeight,
+                    rotationDegrees = 0,
+                    boxes = boxes,
+                    trackedBall = trackedBall,
+                    missStreak = ballTracker.missFrames,
+                    // nanoTime shares CLOCK_MONOTONIC with Compose withFrameNanos for overlay-lag HUD
+                    emitElapsedRealtimeNanos = System.nanoTime()
+                )
+                runLivePoseIfGated(bitmap = rotatedBitmap, boxes = boxes)
+                processPoseValidationIfNeeded(
+                    frameStartNs = frameStartNs,
+                    yoloPreprocessMs = yoloPreprocessMs,
+                    yoloInferenceMs = yoloInferenceMs,
+                    yoloNmsMs = yoloNmsMs
+                )
+                appendPerFramePerfRow(
+                    frameTotalMs = elapsedMs(frameStartNs),
+                    yoloPreprocessMs = yoloPreprocessMs,
+                    yoloInferenceMs = yoloInferenceMs,
+                    yoloNmsMs = yoloNmsMs,
+                    rotationDegrees = normalizedRotation
+                )
             } finally {
-                bitmap.recycle()
-            }
-            val yoloPreprocessMs = elapsedMs(yoloPreprocessStartNs)
-
-            val rotatedWidth: Int
-            val rotatedHeight: Int
-            if (normalizedRotation == 90 || normalizedRotation == 270) {
-                rotatedWidth = bitmapH
-                rotatedHeight = bitmapW
-            } else {
-                rotatedWidth = bitmapW
-                rotatedHeight = bitmapH
-            }
-
-            val inputBuffer = tensorImage.buffer
-            val boxes: List<DetectionBox>
-            val yoloInferenceMs: Double
-            val yoloNmsMs: Double
-            when (outputFormat) {
-                ModelOutputFormat.RAW_8400 -> {
-                    for (row in outputTensorRaw[0]) row.fill(0f)
-                    val yoloInferenceStartNs = System.nanoTime()
-                    localInterpreter.run(inputBuffer, outputTensorRaw)
-                    yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
-
-                    val yoloNmsStartNs = System.nanoTime()
-                    boxes = parseModelOutput(outputTensorRaw, CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD)
-                    yoloNmsMs = elapsedMs(yoloNmsStartNs)
+                if (rotatedBitmap !== sensorBitmap) {
+                    rotatedBitmap.recycle()
                 }
-                ModelOutputFormat.END_TO_END_300 -> {
-                    for (row in outputTensorE2E[0]) row.fill(0f)
-                    val yoloInferenceStartNs = System.nanoTime()
-                    localInterpreter.run(inputBuffer, outputTensorE2E)
-                    yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
-
-                    val yoloNmsStartNs = System.nanoTime()
-                    boxes = parseEndToEndOutput(outputTensorE2E, CONFIDENCE_THRESHOLD)
-                    yoloNmsMs = elapsedMs(yoloNmsStartNs)
-                }
+                sensorBitmap.recycle()
             }
-            lastInferenceMs.set(yoloInferenceMs)
-            var bestBallBox: DetectionBox? = null
-            for (box in boxes) {
-                if (box.classId != BALL_CLASS_ID) continue
-                val currentBest = bestBallBox
-                if (currentBest == null || box.confidence > currentBest.confidence) {
-                    bestBallBox = box
-                }
-            }
-            val dtSec = trackerDeltaSeconds(imageTimestampNs)
-            val trackedBall = ballTracker.track(
-                dtSec = dtSec,
-                measurement = bestBallBox
-            )
-            latestTrackedBall.set(trackedBall.takeIf { it.isTracked })
-            latestMissStreak.set(ballTracker.missFrames)
-            _detections.value = DetectionFrame(
-                timestampNs = imageTimestampNs,
-                sourceWidth = rotatedWidth,
-                sourceHeight = rotatedHeight,
-                rotationDegrees = 0,
-                boxes = boxes,
-                trackedBall = trackedBall,
-                missStreak = ballTracker.missFrames
-            )
-            processPoseValidationIfNeeded(
-                frameStartNs = frameStartNs,
-                yoloPreprocessMs = yoloPreprocessMs,
-                yoloInferenceMs = yoloInferenceMs,
-                yoloNmsMs = yoloNmsMs
-            )
         } catch (error: Throwable) {
             _lastError.value = "Frame processing failed: ${error.message ?: "unknown error"}"
         } finally {
             image.close()
         }
     }
+
+    private fun runLivePoseIfGated(bitmap: Bitmap, boxes: List<DetectionBox>) {
+        perFrameTimingAccumulator.reset()
+        val personBox = selectPersonBox(boxes) ?: run {
+            _poseResult.value = null
+            lastFrameSkippedPose.set(true)
+            return
+        }
+
+        if (!shouldRunPose(boxes)) {
+            _poseResult.value = null
+            lastFrameSkippedPose.set(true)
+            return
+        }
+
+        val localPoseInterpreter = poseInterpreter ?: run {
+            _poseResult.value = null
+            lastFrameSkippedPose.set(true)
+            return
+        }
+
+        val poseCropStartNs = System.nanoTime()
+        val personCrop = squarePadCrop(bitmap, personBox = personBox, marginFactor = 1.25f)
+        val poseCropMs = elapsedMs(poseCropStartNs)
+        try {
+            val poseResult = localPoseInterpreter.infer(personCrop.bitmap)
+            _poseResult.value = LivePoseOverlay(
+                poseResult = poseResult,
+                cropRectNormalized = personCrop.cropRectNormalized,
+                // nanoTime shares CLOCK_MONOTONIC with Compose withFrameNanos for overlay-lag HUD
+                emitElapsedRealtimeNanos = System.nanoTime()
+            )
+            perFrameTimingAccumulator.record(
+                poseCropMs = poseCropMs,
+                posePreprocessMs = poseResult.latency.preprocessMs,
+                poseInferenceMs = poseResult.latency.inferenceMs,
+                posePostprocessMs = poseResult.latency.postprocessMs
+            )
+            lastFrameSkippedPose.set(false)
+        } catch (error: Throwable) {
+            _poseResult.value = null
+            perFrameTimingAccumulator.reset()
+            lastFrameSkippedPose.set(true)
+            _lastError.value = "Pose inference failed: ${error.message ?: "unknown error"}"
+        } finally {
+            personCrop.bitmap.recycle()
+        }
+    }
+
+    private fun selectPersonBox(boxes: List<DetectionBox>): DetectionBox? {
+        val persons = boxes.asSequence().filter { it.classId == PERSON_CLASS_ID }
+        return when (personSelectionMode.get()) {
+            PersonSelectionMode.HIGHEST_CONFIDENCE,
+            PersonSelectionMode.REID_TRACKED -> {
+                // ADR-006 stub: REID_TRACKED falls back to highest confidence in Phase 0.
+                persons.maxByOrNull { it.confidence }
+            }
+        }
+    }
+
+    private fun shouldRunPose(boxes: List<DetectionBox>): Boolean {
+        return when (poseGatingMode.get()) {
+            PoseGatingMode.EVERY_FRAME_WITH_PERSON -> true
+            PoseGatingMode.SHOOT_CLASS_GATED -> {
+                // ADR-006 Day 6 stub: keep EVERY_FRAME behavior until shoot-gated wiring lands.
+                @Suppress("UNUSED_VARIABLE")
+                val hasShootSignal = boxes.any { it.classId == SHOOT_CLASS_ID }
+                true
+            }
+            PoseGatingMode.FSM_GATED -> {
+                // ADR-006 Day 6 stub: keep EVERY_FRAME behavior until Day 7 FSM wiring lands.
+                true
+            }
+        }
+    }
+
+    private fun appendPerFramePerfRow(
+        frameTotalMs: Double,
+        yoloPreprocessMs: Double,
+        yoloInferenceMs: Double,
+        yoloNmsMs: Double,
+        rotationDegrees: Int
+    ) {
+        val logger = perFrameLogger ?: return
+        val poseSkipped = lastFrameSkippedPose.get()
+        val row = PerFramePerfRow(
+            timestampMs = System.currentTimeMillis(),
+            frameTotalMs = frameTotalMs,
+            yoloPreprocessMs = yoloPreprocessMs,
+            yoloInferenceMs = yoloInferenceMs,
+            yoloNmsMs = yoloNmsMs,
+            poseCropMs = perFrameTimingAccumulator.poseCropMs,
+            posePreprocessMs = perFrameTimingAccumulator.posePreprocessMs,
+            poseInferenceMs = perFrameTimingAccumulator.poseInferenceMs,
+            posePostprocessMs = perFrameTimingAccumulator.posePostprocessMs,
+            poseSkipped = poseSkipped,
+            ramMb = currentProcessRamMb(),
+            thermalStatus = thermalStatusProvider(),
+            fps1sWindow = _stats.value.analysisFps,
+            rotationDegrees = rotationDegrees,
+            mode = perFrameMode,
+            device = perFrameDevice,
+            gpuMode = currentMode.get().name
+        )
+        runCatching { logger.append(row) }
+            .onFailure { error ->
+                _lastError.value = "Per-frame logger append failed: ${error.message ?: "unknown error"}"
+            }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun runLivePoseForTest(bitmap: Bitmap, boxes: List<DetectionBox>) {
+        runLivePoseIfGated(bitmap, boxes)
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun emitPerFrameRowForTest(
+        frameTotalMs: Double,
+        yoloPreprocessMs: Double,
+        yoloInferenceMs: Double,
+        yoloNmsMs: Double,
+        rotationDegrees: Int = 0
+    ) {
+        appendPerFramePerfRow(
+            frameTotalMs = frameTotalMs,
+            yoloPreprocessMs = yoloPreprocessMs,
+            yoloInferenceMs = yoloInferenceMs,
+            yoloNmsMs = yoloNmsMs,
+            rotationDegrees = rotationDegrees
+        )
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun initializePoseInterpreterForTest() {
+        initializePoseInterpreterIfNeeded()
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun forceCurrentInferenceModeForTest(mode: InferenceMode) {
+        currentMode.set(mode)
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun switchInterpreterForTest(mode: InferenceMode): Boolean = switchInterpreter(mode)
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun hasPoseInterpreterForTest(): Boolean = poseInterpreter != null
 
     private fun processPoseValidationIfNeeded(
         frameStartNs: Long,
@@ -901,6 +1062,7 @@ class FrameProcessor(
         ballTracker.reset()
         latestTrackedBall.set(null)
         latestMissStreak.set(0)
+        lastFrameSkippedPose.set(true)
         lastImageTimestampNs = -1L
         lastTrackerTimestampNs = -1L
     }
@@ -933,7 +1095,8 @@ class FrameProcessor(
                 trackCy = trackedBall?.centroidY?.toDouble(),
                 trackVx = trackedBall?.velocityX?.toDouble(),
                 trackVy = trackedBall?.velocityY?.toDouble(),
-                missStreak = latestMissStreak.get()
+                missStreak = latestMissStreak.get(),
+                poseSkipped = lastFrameSkippedPose.get()
             )
         }
     }
@@ -952,6 +1115,36 @@ class FrameProcessor(
     }
 
     private fun elapsedMs(startNs: Long): Double = (System.nanoTime() - startNs) / 1_000_000.0
+
+    private class PerFrameTimingAccumulator {
+        var poseCropMs: Double = 0.0
+            private set
+        var posePreprocessMs: Double = 0.0
+            private set
+        var poseInferenceMs: Double = 0.0
+            private set
+        var posePostprocessMs: Double = 0.0
+            private set
+
+        fun reset() {
+            poseCropMs = 0.0
+            posePreprocessMs = 0.0
+            poseInferenceMs = 0.0
+            posePostprocessMs = 0.0
+        }
+
+        fun record(
+            poseCropMs: Double,
+            posePreprocessMs: Double,
+            poseInferenceMs: Double,
+            posePostprocessMs: Double
+        ) {
+            this.poseCropMs = poseCropMs
+            this.posePreprocessMs = posePreprocessMs
+            this.poseInferenceMs = poseInferenceMs
+            this.posePostprocessMs = posePostprocessMs
+        }
+    }
 
     private data class PoseValidationEntry(
         val sourceIndex: Int,
@@ -977,6 +1170,8 @@ class FrameProcessor(
         private const val POSE_VISIBILITY_THRESHOLD = 0.60f
         private const val POSE_PRESENCE_THRESHOLD = 0.50f
         private const val BALL_CLASS_ID = 0
+        private const val PERSON_CLASS_ID = 2
+        private const val SHOOT_CLASS_ID = 4
         private const val DEFAULT_TRACKER_DT_SEC = 1f / 30f
         private const val MIN_TRACKER_DT_SEC = 1f / 120f
         private const val MAX_TRACKER_DT_SEC = 0.25f

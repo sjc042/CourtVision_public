@@ -118,19 +118,24 @@ The TFLite GPU delegate requires that `ModifyGraphWithDelegate()` and all subseq
 
 ```kotlin
 // Correct — both .run() calls on same dispatcher, sequential
-suspend fun analyzeFrame(frame: Bitmap) = withContext(consumerDispatcher) {
+suspend fun analyzeFrame(sensorFrame: Bitmap, rotationDegrees: Int) = withContext(consumerDispatcher) {
+    val uprightFrame = rotateBitmapForDisplay(sensorFrame, rotationDegrees)
+
     // Stage 1: YOLO
-    copyToInputTensor(frame, yoloInputBuffer)          // pre-allocated, no-alloc rule
+    copyToInputTensor(uprightFrame, yoloInputBuffer)   // pre-allocated, no-alloc rule
     yoloInterpreter.run(yoloInputBuffer, yoloOutputs)
     val detections = decodeAndNms(yoloOutputs)         // Kotlin-side NMS
 
-    // Stage 2: Pose (only when person detected and in SETUP or FLIGHT state)
+    // Stage 2: Pose (same upright frame and normalized coords as YOLO)
     val personBox = detections.firstOrNull { it.classId == CLASS_PERSON } ?: return@withContext
-    val crop = squarePadCrop(frame, personBox, marginFactor = 1.25f)
-    val resized = Bitmap.createScaledBitmap(crop, 256, 256, false)
-    copyToInputTensor(resized, poseInputBuffer)        // pre-allocated
+    val personCrop = squarePadCrop(uprightFrame, personBox, marginFactor = 1.25f)
+    copyToInputTensor(personCrop.bitmap, poseInputBuffer)
     poseInterpreter.run(poseInputBuffer, poseOutputs)
-    val landmarks = decodeLandmarks(poseOutputs)       // WorldLandmarks, meters
+    val landmarks = decodeLandmarks(poseOutputs)
+    emitLivePoseOverlay(
+        poseResult = landmarks,
+        cropRectNormalized = personCrop.cropRectNormalized
+    )
 }
 ```
 
@@ -144,11 +149,16 @@ suspend fun analyzeFrame(frame: Bitmap) = withContext(consumerDispatcher) {
 The pose landmark model expects a square, padded, normalized crop. Feeding a raw YOLO bounding box without margin degrades landmark accuracy, particularly for limbs near the box edge.
 
 ```kotlin
+data class PersonCrop(
+    val bitmap: Bitmap,
+    val cropRectNormalized: CropRectNormalized
+)
+
 fun squarePadCrop(
     src: Bitmap,
-    box: BoundingBox,       // normalized [0, 1]
+    box: DetectionBox,      // normalized [0, 1]
     marginFactor: Float = 1.25f
-): Bitmap {
+): PersonCrop {
     val W = src.width.toFloat()
     val H = src.height.toFloat()
 
@@ -165,11 +175,26 @@ fun squarePadCrop(
     val bottom = (cy + halfSide).coerceAtMost(H).toInt()
 
     val cropped = Bitmap.createBitmap(src, left, top, right - left, bottom - top)
-    return Bitmap.createScaledBitmap(cropped, 256, 256, false)
+    val scaled = Bitmap.createScaledBitmap(cropped, 256, 256, true)
+    if (cropped !== scaled) cropped.recycle()
+
+    return PersonCrop(
+        bitmap = scaled,
+        cropRectNormalized = CropRectNormalized(
+            left = left / W,
+            top = top / H,
+            right = right / W,
+            bottom = bottom / H
+        )
+    )
 }
 ```
 
 Recommended margin: `1.25f` baseline. Increase to `1.35f` if YOLO bounding boxes are observed to clip limbs at low camera angles.
+
+Rotation ownership: `rotateBitmapForDisplay` now runs once per frame before YOLO preprocessing.
+`Rot90Op` is removed from the YOLO `ImageProcessor` chain, and both YOLO + pose consume the same
+display-upright bitmap and normalized coordinate frame.
 
 ### 4. WorldLandmarks interpretation
 
@@ -225,7 +250,12 @@ val poseInputBuffer  = ByteBuffer.allocateDirect(1 * 256 * 256 * 3 * 4).order(By
 // Output buffers sized to model output shapes
 ```
 
-`Bitmap.createScaledBitmap()` in `squarePadCrop` **does allocate** — this is acceptable at ~1 ms and outside the hot tensor path. If profiling shows GC pressure, replace with a pre-allocated `Canvas`-based rescale.
+Explicit Day 6 exceptions to the no-alloc tensor path:
+- One rotated full-frame bitmap per non-`ROTATION_0` frame (`rotateBitmapForDisplay`), recycled in outer `finally`.
+- One scaled 256x256 pose bitmap per pose-eligible frame (`squarePadCrop`), recycled after `infer()`.
+
+`Bitmap.createScaledBitmap()` in `squarePadCrop` remains acceptable for Day 6. If profiling shows
+GC pressure, move to bitmap pooling in Phase 2.
 
 ---
 
@@ -241,6 +271,7 @@ val poseInputBuffer  = ByteBuffer.allocateDirect(1 * 256 * 256 * 3 * 4).order(By
 
 ### Negative / Risks
 
+- **Pre-rotated bitmap allocation**: one extra ARGB_8888 bitmap per non-ROTATION_0 frame (~3.5 MB at 720x1280). Accepted on S22+; A54 verification pending. Pooling deferred to Phase 2.
 - **Pose FPS coupled to YOLO FPS**: In the old two-channel design, pose could be gated to run every 3rd frame independently. Now both models run together. Mitigate by skipping pose when FSM state is `IDLE` or `MADE` (no biomechanics needed).
 - **Cold start latency**: eager startup init for both interpreters is not fully implemented yet. Current pose init is on-demand; this may shift some startup cost to first pose-use frame.
 - **Peak GPU memory**: YOLO FP16 (~6 MB model) + `pose_landmarks_detector.tflite` (lite variant, ~3–4 MB) + tensor buffers must fit within the ~400 MB RAM budget. Verify on A54 with Android Profiler before shipping.

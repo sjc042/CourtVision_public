@@ -163,13 +163,14 @@ inference loop for Day 4+ testing.
 | yolo11n | 480x480 | 0.93375 | 0.73111 | |
 | yolo11n | 320x320 | 0.90842 | 0.67137 | |
 | yolov8s | 640×640 | 0.94244 | 0.76115 | |
+| yolov11s | 640×640| 0.94717 | 0.76909 | |
 
 ### Remaining Training
 
 | Model | Input Size | Status |
 |-------|-----------|--------|
 | yolov8s | 480 / 320 | Pending |
-| yolov11s | 640 / 480 / 320 | Pending | 
+| yolov11s | 480 / 320 | Pending |
 
 Settings: Mixed precision, no dropout, default YOLO augmentation, cosine LR (50 epochs sufficient for convergence).
 

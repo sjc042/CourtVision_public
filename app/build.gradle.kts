@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("tech.apter.junit5.jupiter.robolectric-extension-gradle-plugin") version "0.9.0"
 }
 
 android {
@@ -58,8 +59,32 @@ android {
     }
 }
 
+val pinnedKotlinVersionForTests = "1.9.24"
+val pinnedKotlinArtifactsForTests = setOf(
+    "kotlin-stdlib",
+    "kotlin-stdlib-common",
+    "kotlin-stdlib-jdk7",
+    "kotlin-stdlib-jdk8",
+    "kotlin-reflect"
+)
+
+configurations.configureEach {
+    if (name.contains("Test")) {
+        resolutionStrategy.eachDependency {
+            if (
+                requested.group == "org.jetbrains.kotlin" &&
+                requested.name in pinnedKotlinArtifactsForTests
+            ) {
+                useVersion(pinnedKotlinVersionForTests)
+                because("Align Kotlin runtime on test classpaths with Kotlin 1.9.24 compiler/toolchain.")
+            }
+        }
+    }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    val junitBom = platform("org.junit:junit-bom:5.10.2")
     val cameraxVersion = "1.3.4"
 
     implementation("androidx.core:core-ktx:1.13.1")
@@ -86,13 +111,17 @@ dependencies {
 
     implementation("com.google.android.material:material:1.12.0")
 
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(junitBom)
+    testImplementation("org.junit.jupiter:junit-jupiter-api")
+    testImplementation("org.junit.jupiter:junit-jupiter-params")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("tech.apter.junit5.jupiter:robolectric-extension:0.9.0")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation(composeBom)
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

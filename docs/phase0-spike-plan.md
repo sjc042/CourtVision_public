@@ -71,7 +71,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 - Measure tracking stability and false positive rate
 - **Output:** Smooth ball trajectory over a 10-shot sequence
 
-### Day 5 — Pose Landmark Model: Isolated Validation
+### Day 5 — Pose Landmark Model: Isolated Validation ✅
 
 > Architecture: [ADR-005 — Sequential GPU Inference Pipeline](decisions/005-sequential-gpu-inference-pipeline.md)
 
@@ -96,6 +96,10 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 - **PRD targets:** Combined p95 ≤ 50ms on Pixel 6, ≤ 80ms on A54; RAM < 400MB; no sustained thermal throttle
 - **Fallback:** If A54 p95 > 80ms, fall back to pose on CPU (4 threads, every 3rd frame) — see ADR-005 Config D
 - **Output:** Combined performance report
+- **Pose gating:** `PoseGatingMode.EVERY_FRAME_WITH_PERSON` (Day 6 default); `FSM_GATED` wired in Day 7 — see [ADR-006](decisions/006-pose-gating-mode.md)
+
+> **Note:** The original `frame-scheduling-spec.md` (Worker A / Worker B two-channel design) is
+> superseded by ADR-005. See `frame-scheduling-spec.md` header for details.
 
 ### Day 7 — Shot Detection Logic (State Machine)
 

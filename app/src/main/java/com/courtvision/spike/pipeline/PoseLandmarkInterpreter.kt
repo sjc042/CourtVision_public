@@ -9,13 +9,12 @@ import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
-import org.tensorflow.lite.support.image.ops.ResizeOp
 import java.nio.MappedByteBuffer
 
 class PoseLandmarkInterpreter(
     modelBuffer: MappedByteBuffer,
     useGpu: Boolean = true
-) : AutoCloseable {
+) : PoseInferenceEngine {
 
     data class OutputTensorIndices(
         val image: Int,
@@ -32,13 +31,6 @@ class PoseLandmarkInterpreter(
     private val worldOutput = Array(1) { FloatArray(PoseTensorContract.WORLD_OUTPUT_SIZE) }
 
     private val preprocessor = ImageProcessor.Builder()
-        .add(
-            ResizeOp(
-                PoseTensorContract.INPUT_SIZE,
-                PoseTensorContract.INPUT_SIZE,
-                ResizeOp.ResizeMethod.BILINEAR
-            )
-        )
         .add(NormalizeOp(0f, 255f))
         .build()
     private val tensorImage = TensorImage(DataType.FLOAT32)
@@ -67,7 +59,14 @@ class PoseLandmarkInterpreter(
         validateOutputTensorType(outputIndices.world, interpreter.getOutputTensor(outputIndices.world).dataType())
     }
 
-    fun infer(cropBitmap: Bitmap): PoseResult {
+    override fun infer(cropBitmap: Bitmap): PoseResult {
+        require(
+            cropBitmap.width == PoseTensorContract.INPUT_SIZE &&
+                cropBitmap.height == PoseTensorContract.INPUT_SIZE
+        ) {
+            "Pose input must be ${PoseTensorContract.INPUT_SIZE}x${PoseTensorContract.INPUT_SIZE}, " +
+                "was ${cropBitmap.width}x${cropBitmap.height}"
+        }
         val totalStartNs = System.nanoTime()
         val preprocessStartNs = totalStartNs
 

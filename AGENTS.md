@@ -4,6 +4,9 @@ Read before doing anything else:
 - ./CONTEXT.md
 - ./TASKS.md
 
+## When writing new code
+- Follow the coding style guide at ./docs/coding-style-guide.md
+
 ## Your role
 - Kotlin logic: ViewModel, UseCase, Repository
 - CameraX inference loop, Kalman filter
@@ -17,6 +20,7 @@ Read before doing anything else:
 - Inference always on Dispatchers.Default, never Main
 - TFLiteInterpreter and PoseLandmarker are not thread-safe — never share across coroutines
 - No allocations inside ImageAnalysis.Analyzer.analyze()
+- Plan files (`docs/plans/`) must not reference `TASKS.md` — it is temporary task tracking and will be archived. Any constraint, risk, or context worth recording belongs in the plan doc itself.
 
 ## Build & Test
 

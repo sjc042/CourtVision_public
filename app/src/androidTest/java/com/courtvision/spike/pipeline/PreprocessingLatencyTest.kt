@@ -3,12 +3,10 @@ package com.courtvision.spike.pipeline
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Log
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.junit.runner.RunWith
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
@@ -16,11 +14,10 @@ import org.tensorflow.lite.support.image.ops.ResizeOp
 
 /**
  * On-device smoke tests that measure per-component latency in the frame pipeline.
- * Run with: ./gradlew connectedDebugAndroidTest --tests "*.PreprocessingLatencyTest"
+ * Run with: ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.courtvision.spike.pipeline.PreprocessingLatencyTest
  *
  * Results appear in Logcat under tag "LatencyTest".
  */
-@RunWith(AndroidJUnit4::class)
 class PreprocessingLatencyTest {
 
     companion object {

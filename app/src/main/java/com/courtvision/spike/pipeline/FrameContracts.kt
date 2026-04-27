@@ -23,7 +23,8 @@ data class PipelineStats(
     val trackCy: Double? = null,
     val trackVx: Double? = null,
     val trackVy: Double? = null,
-    val missStreak: Int = 0
+    val missStreak: Int = 0,
+    val poseSkipped: Boolean = true
 )
 
 interface FrameConsumer {
@@ -47,6 +48,17 @@ enum class InferenceMode {
     CPU,
     GPU,
     NNAPI
+}
+
+enum class PoseGatingMode {
+    EVERY_FRAME_WITH_PERSON,
+    SHOOT_CLASS_GATED,
+    FSM_GATED
+}
+
+enum class PersonSelectionMode {
+    HIGHEST_CONFIDENCE,
+    REID_TRACKED
 }
 
 enum class RotationStallState {
@@ -91,7 +103,21 @@ data class DetectionFrame(
     val rotationDegrees: Int = 0,
     val boxes: List<DetectionBox> = emptyList(),
     val trackedBall: TrackedBall? = null,
-    val missStreak: Int = 0
+    val missStreak: Int = 0,
+    val emitElapsedRealtimeNanos: Long = 0L
+)
+
+data class CropRectNormalized(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+)
+
+data class LivePoseOverlay(
+    val poseResult: PoseResult,
+    val cropRectNormalized: CropRectNormalized,
+    val emitElapsedRealtimeNanos: Long = 0L
 )
 
 fun rotateDetectionBox(
