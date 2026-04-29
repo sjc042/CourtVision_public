@@ -102,6 +102,7 @@ class FrameProcessor(
         .add(ResizeOp(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, ResizeOp.ResizeMethod.BILINEAR))
         .add(NormalizeOp(0f, 255f))
         .build()
+    private val yoloTensorImage = TensorImage(DataType.FLOAT32)
 
     private lateinit var outputTensorRaw: Array<Array<FloatArray>>
     private val outputTensorE2E = Array(1) { Array(E2E_MAX_DETS) { FloatArray(E2E_FIELDS) } }
@@ -340,6 +341,7 @@ class FrameProcessor(
 
         val options = Interpreter.Options().apply {
             setNumThreads(4)
+            setAllowBufferHandleOutput(true)
         }
 
         var localGpuDelegate: GpuDelegate? = null
@@ -352,7 +354,7 @@ class FrameProcessor(
                     _lastError.value = "GPU delegate unsupported on this device"
                     return false
                 }
-                localGpuDelegate = GpuDelegate(compatibility.bestOptionsForThisDevice).also {
+                localGpuDelegate = buildSustainedSpeedGpuDelegate().also {
                     options.addDelegate(it)
                 }
             }
@@ -488,7 +490,8 @@ class FrameProcessor(
                 val rotatedWidth = rotatedBitmap.width
                 val rotatedHeight = rotatedBitmap.height
                 val yoloPreprocessStartNs = System.nanoTime()
-                val tensorImage = yoloImageProcessor.process(TensorImage.fromBitmap(rotatedBitmap))
+                yoloTensorImage.load(rotatedBitmap)
+                val tensorImage = yoloImageProcessor.process(yoloTensorImage)
                 val yoloPreprocessMs = elapsedMs(yoloPreprocessStartNs)
 
                 val inputBuffer = tensorImage.buffer

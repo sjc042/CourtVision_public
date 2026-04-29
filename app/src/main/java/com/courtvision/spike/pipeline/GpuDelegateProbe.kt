@@ -4,6 +4,27 @@ import android.os.Build
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 
+internal data class SustainedSpeedGpuDelegateConfig(
+    val inferencePreference: Int,
+    val isPrecisionLossAllowed: Boolean
+)
+
+internal fun sustainedSpeedGpuDelegateConfig(): SustainedSpeedGpuDelegateConfig =
+    SustainedSpeedGpuDelegateConfig(
+        inferencePreference = GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED,
+        isPrecisionLossAllowed = true
+    )
+
+fun buildSustainedSpeedGpuDelegate(): GpuDelegate {
+    val config = sustainedSpeedGpuDelegateConfig()
+    return GpuDelegate(
+        GpuDelegate.Options().apply {
+            inferencePreference = config.inferencePreference
+            isPrecisionLossAllowed = config.isPrecisionLossAllowed
+        }
+    )
+}
+
 object GpuDelegateProbe {
     fun probe(): GpuProbeResult {
         val model = Build.MODEL ?: "unknown"
@@ -20,8 +41,7 @@ object GpuDelegateProbe {
         }
 
         return try {
-            val options = compatibilityList.bestOptionsForThisDevice
-            val delegate = GpuDelegate(options)
+            val delegate = buildSustainedSpeedGpuDelegate()
             delegate.close()
             GpuProbeResult(
                 status = GpuStatus.GPU_SUPPORTED,

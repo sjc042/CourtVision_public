@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import kotlin.math.exp
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
@@ -39,8 +38,7 @@ class PoseLandmarkInterpreter(
         val runtimeConfig = resolveRuntimeConfig(useGpu)
         val options = Interpreter.Options()
         val localDelegate = if (runtimeConfig.useGpu) {
-            val compatibility = CompatibilityList()
-            GpuDelegate(compatibility.bestOptionsForThisDevice).also { options.addDelegate(it) }
+            buildSustainedSpeedGpuDelegate().also { options.addDelegate(it) }
         } else {
             options.setNumThreads(runtimeConfig.cpuThreads)
             null
