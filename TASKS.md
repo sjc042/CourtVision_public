@@ -1,62 +1,162 @@
-﻿# Tasks — Phase 0 Spike
+# Tasks — Phase 0 Spike
 
-Last updated: 2026-04-26
+Last updated: 2026-04-27
 
-## Active branch
-`spike/day6-combined-pipeline` (branch from `main`)
+## Next planned branches
+`perf/day6-2-trivial-perf-wins` → `perf/day6-1-qnn-npu-pipeline` → `perf/day6-3-gpu-serialization-cpu-fallback`
 
-> Days 1–5 complete. See archived plans: `docs/plans/day1-2-plan.md`, `docs/plans/day3+weekend-plan.md`, `docs/plans/day4_kalman-filter-tracker.md`, `docs/plans/day5-pose-isolated.md`.
-
----
-
-## Active 🔲 Day 6: Sequential GPU Combined Pipeline
-
-> Branch: `spike/day6-combined-pipeline`
-> Plan: `docs/plans/day6-combined-pipeline.md`
-> Architecture: `docs/decisions/005-sequential-gpu-inference-pipeline.md`
-
-### Pre-requisites from Day 5 ✅
-1. ✅ Migrate `PoseLandmarkInterpreterTest` to JUnit 5 (`org.junit.jupiter.api.Test`, `assertThrows<T> { }`) — currently JUnit 4; CONTEXT.md specifies JUnit 5 *(Day 5 item 15)*
-2. ✅ Fix `PoseLandmarkInterpreter.infer()` no-alloc: pre-allocated `TensorImage`/`ImageProcessor` hot path now in place; `infer()` enforces 256x256 caller contract.
-   - Profiler gate dropped from Day 6 sign-off (2026-04-22). Step 7 soak provides indirect verification: `pose_inference_ms` p50/p99 = 11.17/19.44 ms spread is inconsistent with per-frame ~1 MB allocations. Direct profiler capture deferred to Phase 2 if pose-side allocation regression ever suspected. See CONTEXT.md "Day 6 Step 2 Verification Note".
-3. ✅ Fix bitmap lifecycle in `processImage()`: `bitmap.recycle()` moved to outer `finally` ([FrameProcessor.kt:574](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L574)); live path `crop.recycle()` in `runLivePoseIfGated` finally ([line 612](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L612)).
-4. ✅ Wire pose `useGpu` through `InferenceMode` — `initializePoseInterpreterIfNeeded()` reads `currentMode.get() != InferenceMode.CPU` ([FrameProcessor.kt:288](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L288)); `switchInterpreter` forces pose re-init on mode change ([line 343](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L343)).
-
-### Core implementation ✅
-5. ✅ `BitmapOps.kt` — bbox-aware `squarePadCrop(src, box, marginFactor=1.25f)` overload added ([BitmapOps.kt:36-81](app/src/main/java/com/courtvision/spike/pipeline/BitmapOps.kt#L36-L81)); output always 256×256 per `PoseTensorContract.INPUT_SIZE`, with defensive clamp-to-1px for degenerate bboxes. `BitmapOpsTest` covers withBbox/bboxAtEdge/bboxFullFrame cases.
-5a. ✅ `FrameContracts.kt` — `PoseGatingMode` + `PersonSelectionMode` enums added ([FrameContracts.kt:53-62](app/src/main/java/com/courtvision/spike/pipeline/FrameContracts.kt#L53-L62)); `PERSON_CLASS_ID = 2` and `SHOOT_CLASS_ID = 4` constants in `FrameProcessor.Companion` ([lines 1081-1082](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L1081-L1082)); gateway setters added ([FrameProcessorGateway.kt:20-21](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessorGateway.kt#L20-L21)).
-6. ✅ `FrameProcessor.kt` — live pose wired via `runLivePoseIfGated` ([FrameProcessor.kt:583-614](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L583-L614)); `selectPersonBox` and `shouldRunPose` dispatch ADR-006 enums; `personBox == null` and gating-mode checks now split (single-responsibility). `FSM_GATED` / `SHOOT_CLASS_GATED` silently fall back to `EVERY_FRAME_WITH_PERSON` per ADR-006 §Consequences.
-7. ✅ `FrameProcessorGateway.kt` — `val poseResult: StateFlow<PoseResult?>` added ([line 11](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessorGateway.kt#L11)); `_poseResult: MutableStateFlow<PoseResult?>` in `FrameProcessor` ([line 80](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L80)).
-8. ✅ `CameraViewModel.kt` — 5th collector block gates `poseOverlay` on `modelConfirmed` ([CameraViewModel.kt:151-161](app/src/main/java/com/courtvision/spike/camera/CameraViewModel.kt#L151-L161)); cleared on `setModel()` ([line 286](app/src/main/java/com/courtvision/spike/camera/CameraViewModel.kt#L286)) and `restartSession()` ([line 311](app/src/main/java/com/courtvision/spike/camera/CameraViewModel.kt#L311)). `CameraUiState.poseOverlay: LivePoseOverlay?` added ([CameraUiState.kt:32](app/src/main/java/com/courtvision/spike/camera/CameraUiState.kt#L32)).
-9. ✅ `CameraScreen.kt` — `PoseOverlay` composable between `DetectionOverlay` and `MetricsOverlay` ([CameraScreen.kt:122-127](app/src/main/java/com/courtvision/spike/camera/CameraScreen.kt#L122-L127)); landmark dots colored by `visibility > POSE_VISIBILITY_THRESHOLD = 0.6f` ([line 839](app/src/main/java/com/courtvision/spike/camera/CameraScreen.kt#L839)); uses FILL_CENTER + `cropRectNormalized` to map 256×256 pose coords back to canvas space. Gateway contract upgraded from `PoseResult?` to `LivePoseOverlay?` ([FrameProcessorGateway.kt:11](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessorGateway.kt#L11)); rotation moved upstream via `rotateBitmapForDisplay` ([BitmapOps.kt:37-53](app/src/main/java/com/courtvision/spike/pipeline/BitmapOps.kt#L37-L53)), `Rot90Op` dropped from YOLO chain.
-
-### Tests 🔲
-10. ✅ `FrameProcessorTest` — live pose path tests added: `processImage_liveYoloWithPerson_runsPoseAndEmitsResult`, `processImage_liveYoloNoPerson_skipsPoseAndLeavesPoseResultNull`, `processImage_bitmapRecycledInOuterFinally_noCrash`, `setPoseGatingMode_FSM_GATED_currentlyFallsBackToEveryFrame`, `initializePoseInterpreter_whenYoloGpu_usesGpuDelegate`, `switchInterpreterCpuToGpu_closesAndReinitializesPose` — use `FakePoseInferenceEngine` + `poseInterpreterFactory` injection seam.
-11. ✅ `poseValidationActive`/`poseValidationComplete` reflection-based assertions preserved unchanged ([FrameProcessorTest.kt:282-344](app/src/test/java/com/courtvision/spike/pipeline/FrameProcessorTest.kt#L282-L344)); no StateFlow refactor of those fields in Day 6. Risk still tracked in item 17 for Day 7.
-
-### Benchmark 🔲
-12. ✅ Ran 10-minute soak test on S22+ with full sequential YOLO+pose live pipeline (2026-04-22). Artifact: [benchmarks/phase0/phase0-perframe-20260422-163835.csv](benchmarks/phase0/phase0-perframe-20260422-163835.csv). Coverage: both rotation segments were landscape (S22+ native-landscape sensor); 180° flip within the landscape axis exercises the allocating rotation path via DisplayListener `targetRotation` sync (per ISSUE-013). Headline `ram_mb` 30s-rolling drift = 9.63 MB; rescoped 2026-04-26 via order-swapped soaks ([231515.csv](benchmarks/phase0/phase0-perframe-20260422-231515.csv) + [235704.csv](benchmarks/phase0/phase0-perframe-20260422-235704.csv)) — verdict thermal-cadence artifact, not rotation-bitmap leak.
-13. ✅ Recorded combined latency result in [CONTEXT.md](CONTEXT.md) → "Day 6 Step 7 Benchmark Results". Gate outcomes: §3 FAIL (p95=129 ms) → Day 7 perf, §4 PASS (p95=15 ms), §5 PASS, §6 FAIL (median 8 fps) → Day 7 perf, §7 PASS-with-rescope (alloc-path × NONE/LIGHT drift = 1.74 MB; bitmap pool stays Phase 2 per ADR-005 §Deferred). Full slice table + methodology in [docs/plans/day6-combined-pipeline.md](docs/plans/day6-combined-pipeline.md) "§7 Sliced Re-analysis (2026-04-26)".
-
-**Gate (S22+):** `pose_inference_ms` p95 ≤ 50ms · `frame_total_ms` p95 ≤ 100ms · RAM < 400MB · FPS ≥ 20 sustained · zero thermal throttle events
-**Fallback:** Config D — pose CPU 4 threads if `pose_inference_ms` p95 > 70ms (item 4 above must be done first)
+> Days 1–5 complete. Archived plans: `docs/plans/day1-2-plan.md`, `docs/plans/day3+weekend-plan.md`, `docs/plans/day4_kalman-filter-tracker.md`, `docs/plans/day5-pose-isolated.md`.
 
 ---
 
-### Carried to Day 6 🔲
-15. ✅ `PoseLandmarkInterpreterTest` JUnit 5 migration completed in Day 6 Step 0 (see plan doc).
-16. ✅ Live-path `bitmap.recycle()` deferred to outer `finally` ([FrameProcessor.kt:574](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L574)); `crop.recycle()` in `runLivePoseIfGated` finally ([line 612](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L612)). Validation-path recycle in `processPoseValidationIfNeeded()` unchanged.
-17. ⚠️ **Risk (still open for Day 7)** — `FrameProcessorTest` accesses `poseValidationActive`/`poseValidationComplete` via reflection. Day 6 left these fields as `AtomicBoolean` (additive `poseResult` StateFlow only), so reflection still resolves. Any Day 7 refactor of these fields to `StateFlow<Boolean>` must migrate reflection assertions first.
-18. ✅ Pose `useGpu` now derived from `currentMode.get() != InferenceMode.CPU` ([FrameProcessor.kt:288](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L288)); `switchInterpreter` calls `closePoseResources()` so pose lazy-reinits with matched delegate on the next frame ([line 343](app/src/main/java/com/courtvision/spike/pipeline/FrameProcessor.kt#L343)).
-19. ✅ Replace `getPixels` pixel-copy loop in `PoseLandmarkInterpreter.infer()` with pre-allocated TFLite Support path (`TensorImage` + `ImageProcessor(NormalizeOp)`), no per-frame pixel-array copy in code path.
-    - **Gate:** Profiler capture gate dropped from Day 6 sign-off (2026-04-22) in favour of Step 7 soak indirect verification (pose p50/p99 spread = 8 ms, rules out GC-triggering per-frame allocations). See CONTEXT.md "Day 6 Step 2 Verification Note".
+## Day 6 Closed ✅
 
-**Device:** Samsung Galaxy S22+ (only available device). Pixel 6 and A54 deferred — validate before Phase 2.
-**Gate:** `pose_inference_ms` p95 ≤ 50ms on S22+ (strong pass); 50–70ms = marginal (flag A54 risk); > 70ms → Config D fallback.
-**Fallback:** Config D — pose on CPU, 4 threads (see ADR-005 §Deferred). Requires Blocker B2 (`useGpu=false`) first.
+Day 6 sequential combined pipeline is complete and closed. The detailed execution record remains in `docs/plans/day6-combined-pipeline.md`.
+
+Outcome summary:
+- Pose path passed and is not the bottleneck (`pose_inference_ms` p95 = 15 ms).
+- Combined latency and FPS gates failed, so follow-on perf work moved to Day 6.x.
+- Baseline results driving the next queue:
+  - YOLO p50 = 53 ms
+  - `frame_total_ms` p95 = 129 ms
+  - FPS median = 8
+  - thermal `MODERATE` at t=68 s
 
 ---
 
-## Out of scope
-- Shot detection FSM (Day 7)
-- Pixel 6 + A54 EGL and latency validation (deferred from Day 5 — validate before Phase 2)
+## Active 🔲 Day 6.x: Post-Day-6 Perf Follow-up
+
+Purpose: close the perf gaps identified after Day 6 combined-pipeline validation.
+
+Source gap analysis: `research-reports/Claude-qualcomm-demo-gap-analysis.md`
+
+### Execution order
+
+1. `perf/day6-2-trivial-perf-wins`
+   - Plan: `docs/plans/day6-2-trivial-perf-wins.md`
+   - Gaps: 3, 4, 5
+   - Why first:
+     - no new dependencies
+     - smallest risk
+     - establishes `buildSustainedSpeedGpuDelegate()`
+     - improves the GPU baseline before QNN benchmarking
+   - Unblocks:
+     - shared GPU helper used by Day 6.1 QNN GPU sub-delegate path
+     - serialization upgrade point used by Day 6.3
+
+2. `perf/day6-1-qnn-npu-pipeline`
+   - Plan: `docs/plans/day6-1-qnn-npu-pipeline.md`
+   - Gaps: 1
+   - Why second:
+     - primary bottleneck fix
+     - adds `QNN_NPU`
+     - adds `nativeLibraryDir` / `modelCacheDir` plumbing
+     - adds stable model-token logic that Day 6.3 can reuse
+   - Unblocks:
+     - real NPU path for the S22+ target device
+     - cache-dir and model-token reuse for Day 6.3 GPU shader serialization
+
+3. `perf/day6-3-gpu-serialization-cpu-fallback`
+   - Plan: `docs/plans/day6-3-gpu-serialization-cpu-fallback.md`
+   - Gaps: 2, 7
+   - Why last:
+     - upgrades the helper introduced in Day 6.2
+     - benefits from cache-dir/model-token support introduced in Day 6.1
+     - cleans up the legacy NNAPI path after QNN exists as the true NPU option
+   - Unblocks:
+     - faster repeat GPU cold starts
+     - explicit XNNPack CPU fallback
+     - NNAPI compatibility cleanup without duplicating earlier plumbing work
+
+---
+
+## Dependency / Overlap Notes
+
+Concrete overlap driving the order:
+- shared delegate construction in `GpuDelegateProbe.kt`
+- shared runtime switching in `FrameProcessor.kt`
+- shared pose GPU delegate creation in `PoseLandmarkInterpreter.kt`
+- cache-dir / model-token plumbing in `FrameProcessor` and `CameraViewModel`
+
+Sequencing rules:
+- Day 6.3 assumes Day 6.2’s shared GPU helper exists.
+- Day 6.3 should preferably reuse Day 6.1’s `modelCacheDir` and model-token plumbing.
+- Day 6.1 should land before Day 6.3 to avoid duplicate cache-plumbing work.
+
+Branching rule:
+- Track the three efforts as separate serial work items, not parallel implementation branches.
+
+---
+
+## Per-Plan Queue
+
+### Day 6.2 — Trivial no-dep wins
+
+- Branch: `perf/day6-2-trivial-perf-wins`
+- Plan: `docs/plans/day6-2-trivial-perf-wins.md`
+- Gaps addressed: Gap 3 (`INFERENCE_PREFERENCE_SUSTAINED_SPEED`), Gap 4 (pre-allocated `TensorImage` for YOLO), Gap 5 (`setAllowBufferHandleOutput(true)`)
+- Prerequisites: Day 6 baseline available; no new dependency coordination required
+- Expected outcome: cleaner GPU hot path, reduced alloc pressure, and improved sustained GPU baseline before QNN testing
+- Validation gate summary: GPU path still works; YOLO p50 stays near the Day 6 baseline; thermal trajectory is at least not worse than Day 6
+
+### Day 6.1 — QNN NPU pipeline
+
+- Branch: `perf/day6-1-qnn-npu-pipeline`
+- Plan: `docs/plans/day6-1-qnn-npu-pipeline.md`
+- Gaps addressed: Gap 1 (QNN NPU delegate)
+- Prerequisites: Day 6.2 merged or available; S22+ available; QNN dependencies added; `nativeLibraryDir` and `modelCacheDir` wiring ready
+- Expected outcome: YOLO moves from GPU to Hexagon HTP and becomes the primary latency reduction path
+- Validation gate summary: QNN probe succeeds on S22+; `QNN_NPU` mode switches cleanly; CSV records `gpu_mode=QNN_NPU`; benchmark determines whether INT8 is needed later
+
+### Day 6.3 — GPU shader serialization + CPU fallback cleanup
+
+- Branch: `perf/day6-3-gpu-serialization-cpu-fallback`
+- Plan: `docs/plans/day6-3-gpu-serialization-cpu-fallback.md`
+- Gaps addressed: Gap 2 (GPU shader serialization), Gap 7 (NNAPI → XNNPack CPU fallback)
+- Prerequisites: Day 6.2 helper exists; Day 6.1 cache-dir/model-token plumbing preferably available
+- Expected outcome: faster second GPU cold start, explicit CPU fallback behavior, and NNAPI downgraded to a compatibility alias
+- Validation gate summary: second GPU cold start is materially faster than first; CPU path explicitly uses XNNPack; `NNAPI` selection routes to GPU with warning/compat behavior
+
+> Detailed implementation steps stay in the plan docs and are not duplicated here.
+
+## Carried Day 7 Risk
+
+- `FrameProcessorTest` still accesses `poseValidationActive` and `poseValidationComplete` via reflection.
+- Any Day 7 refactor that replaces those fields with `StateFlow<Boolean>` must migrate those assertions first, or the test will fail at runtime.
+
+---
+
+## NOTE:
+
+- Update gap source file on gap closing
+- Update day6-x plan files on steps completion / gaps closing.
+
+## Validation Order
+
+1. Validate Day 6.2 GPU baseline before starting Day 6.1.
+2. Validate QNN behavior and benchmark results after Day 6.1 before starting Day 6.3.
+3. Validate Day 6.3 cold-start improvement and NNAPI compatibility alias last.
+
+Acceptance checkpoints:
+- After Day 6.2:
+  - GPU path still works
+  - no meaningful YOLO p50 regression
+  - thermal trajectory is at least not worse than Day 6 baseline
+- After Day 6.1:
+  - QNN probe succeeds on S22+
+  - `QNN_NPU` mode switches cleanly
+  - `gpu_mode=QNN_NPU` appears in CSV
+  - benchmark determines whether INT8 is needed later
+- After Day 6.3:
+  - second GPU cold start is materially faster than first
+  - CPU path explicitly uses XNNPack
+  - `NNAPI` selection routes to GPU with warning/compat behavior
+
+---
+
+## Out of Scope / Deferred
+
+- Gap 6 (rotate-after-resize) remains deferred
+- INT8 path remains conditional on the Day 6.1 FP16 result
+- full removal of `InferenceMode.NNAPI` remains a later cleanup, not part of this queue
+- Shot detection FSM remains Day 7 work, not part of Day 6.x perf follow-up
