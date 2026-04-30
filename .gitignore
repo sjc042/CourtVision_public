@@ -25,3 +25,6 @@ app/src/main/assets/*_saved_model/
 
 # AI research reports (local reference only)
 research-reports/
+
+# Debug log captures (adb logcat dumps, etc.)
+*.log

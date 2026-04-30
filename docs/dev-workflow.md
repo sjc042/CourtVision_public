@@ -143,6 +143,11 @@ Run tests scoped to the package you changed:
 ./gradlew testDebugUnitTest --tests "com.courtvision.spike.camera.*"
 ./gradlew testDebugUnitTest --tests "com.courtvision.spike.pipeline.*"
 ./gradlew connectedDebugAndroidTest
+
+./gradlew :app:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=com.courtvision.spike.pipeline.PreprocessingLatencyTest"         
+
+
+./gradlew connectedAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=com.courtvision.spike.pipeline.NpuPreprocessingLatencyTest"
 ```
 
 Or a single test class/method:

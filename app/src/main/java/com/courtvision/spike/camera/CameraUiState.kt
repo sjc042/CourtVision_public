@@ -5,6 +5,7 @@ import com.courtvision.spike.pipeline.GpuProbeResult
 import com.courtvision.spike.pipeline.InferenceMode
 import com.courtvision.spike.pipeline.LivePoseOverlay
 import com.courtvision.spike.pipeline.PipelineStats
+import com.courtvision.spike.pipeline.QnnProbeResult
 
 enum class CameraStatus {
     IDLE,
@@ -18,6 +19,8 @@ data class CameraUiState(
     val hasCameraPermission: Boolean = false,
     val stats: PipelineStats = PipelineStats(),
     val gpuProbeResult: GpuProbeResult = GpuProbeResult(),
+    val qnnProbeResult: QnnProbeResult = QnnProbeResult(),
+    val qnnAvailable: Boolean = false,
     val nnApiProbeResult: String = "NNAPI_UNAVAILABLE: not probed",
     val nnApiAvailable: Boolean = false,
     val availableModels: List<String> = emptyList(),

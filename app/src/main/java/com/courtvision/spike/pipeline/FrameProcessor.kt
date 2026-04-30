@@ -1,11 +1,15 @@
 package com.courtvision.spike.pipeline
 
+import android.os.Build
 import android.graphics.Bitmap
 import android.util.Log
 import android.os.SystemClock
 import androidx.annotation.VisibleForTesting
 import androidx.camera.core.ImageProxy
+import com.qualcomm.qti.QnnDelegate
+import java.nio.ByteBuffer
 import java.nio.MappedByteBuffer
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -31,6 +35,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.TensorFlowLite
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.nnapi.NnApiDelegate
@@ -39,15 +44,67 @@ import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 
-enum class ModelOutputFormat { RAW_8400, END_TO_END_300 }
+enum class ModelOutputFormat { RAW_8400, END_TO_END_300, QNN_INT8_8400 }
+
+internal data class TensorContract(
+    val shape: IntArray,
+    val dataType: DataType
+)
+
+internal interface InferenceEngine {
+    val outputTensorCount: Int
+
+    fun inputTensor(index: Int): TensorContract
+
+    fun outputTensor(index: Int): TensorContract
+
+    fun run(input: Any, output: Any)
+
+    fun runForMultipleInputsOutputs(inputs: Array<Any>, outputs: MutableMap<Int, Any>)
+
+    fun close()
+}
+
+private class LiteRtInferenceEngine(
+    private val interpreter: Interpreter
+) : InferenceEngine {
+    override val outputTensorCount: Int
+        get() = interpreter.outputTensorCount
+
+    override fun inputTensor(index: Int): TensorContract {
+        val tensor = interpreter.getInputTensor(index)
+        return TensorContract(shape = tensor.shape(), dataType = tensor.dataType())
+    }
+
+    override fun outputTensor(index: Int): TensorContract {
+        val tensor = interpreter.getOutputTensor(index)
+        return TensorContract(shape = tensor.shape(), dataType = tensor.dataType())
+    }
+
+    override fun run(input: Any, output: Any) {
+        interpreter.run(input, output)
+    }
+
+    override fun runForMultipleInputsOutputs(inputs: Array<Any>, outputs: MutableMap<Int, Any>) {
+        interpreter.runForMultipleInputsOutputs(inputs, outputs)
+    }
+
+    override fun close() {
+        interpreter.close()
+    }
+}
 
 class FrameProcessor(
     private val scope: CoroutineScope,
-    private val modelBufferProvider: (() -> MappedByteBuffer)? = null,
+    private val modelBufferProvider: ((InferenceMode) -> MappedByteBuffer)? = null,
     private val poseModelBufferProvider: (() -> MappedByteBuffer)? = null,
     private val poseInterpreterFactory: (MappedByteBuffer, Boolean) -> PoseInferenceEngine =
         { modelBuffer, useGpu -> PoseLandmarkInterpreter(modelBuffer, useGpu = useGpu) },
     private val consumerDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
+    private val nativeLibraryDir: String? = null,
+    private val modelCacheDir: String? = null,
+    private val gpuDelegateProvider: (() -> GpuDelegate?)? = null,
+    private val qnnDelegateProvider: (() -> QnnDelegate?)? = null,
     private val thermalStatusProvider: () -> String = { "UNKNOWN" },
     private val perFrameLogger: PerFramePerfLogger? = null,
     private val perFrameMode: String = "sequential_yolo_pose",
@@ -106,11 +163,16 @@ class FrameProcessor(
 
     private lateinit var outputTensorRaw: Array<Array<FloatArray>>
     private val outputTensorE2E = Array(1) { Array(E2E_MAX_DETS) { FloatArray(E2E_FIELDS) } }
+    private lateinit var qnnOutputBoxes: Array<Array<ByteArray>>
+    private lateinit var qnnOutputScores: Array<Array<ByteArray>>
     private var outputFormat = ModelOutputFormat.RAW_8400
 
-    private var interpreter: Interpreter? = null
+    private var interpreter: InferenceEngine? = null
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
+    private var qnnDelegate: QnnDelegate? = null
+    private var qnnDelegateCloseActionForTest: (() -> Unit)? = null
+    private var apiLevelOverrideForTest: Int? = null
     private var poseInterpreter: PoseInferenceEngine? = null
 
     private val frameChannel = Channel<FrameTask>(
@@ -317,7 +379,12 @@ class FrameProcessor(
         }
 
         val switched = switchInterpreter(target)
-        if (!switched && (target == InferenceMode.GPU || target == InferenceMode.NNAPI)) {
+        if (
+            !switched &&
+            (target == InferenceMode.GPU ||
+                target == InferenceMode.NNAPI ||
+                target == InferenceMode.QNN_NPU)
+        ) {
             val delegateFailure = _lastError.value
             switchInterpreter(InferenceMode.CPU)
             if (!delegateFailure.isNullOrBlank()) {
@@ -332,12 +399,14 @@ class FrameProcessor(
         closePoseResources()
         resetTrackingState()
 
-        val mappedModel = modelBufferProvider?.invoke()
+        val mappedModel = modelBufferProvider?.invoke(mode)
         if (mappedModel == null) {
             _lastError.value = "Model buffer provider unavailable"
             currentMode.set(InferenceMode.CPU)
             return false
         }
+
+        logTfLiteRuntimeInfo(mode)
 
         val options = Interpreter.Options().apply {
             setNumThreads(4)
@@ -346,17 +415,15 @@ class FrameProcessor(
 
         var localGpuDelegate: GpuDelegate? = null
         var localNnApiDelegate: NnApiDelegate? = null
+        var localQnnDelegate: QnnDelegate? = null
 
         when (mode) {
             InferenceMode.GPU -> {
-                val compatibility = CompatibilityList()
-                if (!compatibility.isDelegateSupportedOnThisDevice) {
-                    _lastError.value = "GPU delegate unsupported on this device"
+                localGpuDelegate = createGpuDelegate()
+                if (localGpuDelegate == null) {
                     return false
                 }
-                localGpuDelegate = buildSustainedSpeedGpuDelegate().also {
-                    options.addDelegate(it)
-                }
+                options.addDelegate(localGpuDelegate)
             }
             InferenceMode.NNAPI -> {
                 localNnApiDelegate = try {
@@ -367,33 +434,159 @@ class FrameProcessor(
                     return false
                 }
             }
+            InferenceMode.QNN_NPU -> {
+                if (currentApiLevel() < Build.VERSION_CODES.S) {
+                    val qnnFailure = "QNN_NPU requires API 31+; falling back to GPU"
+                    _lastError.value = qnnFailure
+                    val switched = switchInterpreter(InferenceMode.GPU)
+                    _lastError.value = qnnFailure
+                    return switched
+                }
+
+                localQnnDelegate = createQnnDelegate()
+                if (localQnnDelegate == null) {
+                    val qnnFailure = _lastError.value ?: "QNN delegate init failed"
+                    val switched = switchInterpreter(InferenceMode.GPU)
+                    _lastError.value = qnnFailure
+                    return switched
+                }
+                options.addDelegate(localQnnDelegate)
+
+                val gpuSubDelegate = createGpuDelegate()
+                if (gpuSubDelegate != null) {
+                    Log.i(TAG, "[QNN_INIT] GPU sub-delegate added")
+                    localGpuDelegate = gpuSubDelegate
+                    options.addDelegate(gpuSubDelegate)
+                } else {
+                    Log.i(TAG, "[QNN_INIT] GPU sub-delegate unavailable — QNN-only")
+                }
+            }
             InferenceMode.CPU -> {
                 // No delegate for CPU mode.
             }
         }
 
+        if (mode == InferenceMode.QNN_NPU) {
+            Log.i(
+                TAG,
+                "[QNN_INIT] calling Interpreter() — QNN=${localQnnDelegate != null} " +
+                    "GPU_sub=${localGpuDelegate != null} allowBufferHandle=true " +
+                    "modelBytes=${mappedModel.capacity()} md5=${computeModelMd5().take(12)}"
+            )
+        }
+
         return try {
-            val localInterpreter = Interpreter(mappedModel, options)
-            validateTensorContract(localInterpreter)
+            val localInterpreter = LiteRtInferenceEngine(Interpreter(mappedModel, options))
+            if (mode == InferenceMode.QNN_NPU) {
+                validateQnnTensorContract(localInterpreter)
+            } else {
+                validateTensorContract(localInterpreter)
+            }
             interpreter = localInterpreter
             gpuDelegate = localGpuDelegate
             nnApiDelegate = localNnApiDelegate
+            qnnDelegate = localQnnDelegate
             currentMode.set(mode)
             _lastError.value = null
             true
         } catch (error: Throwable) {
+            Log.e(TAG, "[QNN_INIT] Interpreter() FAILED mode=$mode: ${error::class.simpleName}: ${error.message}", error)
             localGpuDelegate?.close()
             localNnApiDelegate?.close()
+            localQnnDelegate?.close()
             _lastError.value = "Interpreter init failed: ${error.message ?: "unknown error"}"
             false
         }
     }
 
-    private fun validateTensorContract(localInterpreter: Interpreter) {
-        val inputShape = localInterpreter.getInputTensor(0).shape()
-        val outputShape = localInterpreter.getOutputTensor(0).shape()
-        val inputType = localInterpreter.getInputTensor(0).dataType()
-        val outputType = localInterpreter.getOutputTensor(0).dataType()
+    private fun tryCreateQnnDelegate(): QnnDelegate? {
+        return try {
+            val options = QnnDelegate.Options()
+            if (nativeLibraryDir != null) {
+                options.setSkelLibraryDir(nativeLibraryDir)
+            }
+            options.setLogLevel(QnnDelegate.Options.LogLevel.LOG_LEVEL_WARN)
+            if (modelCacheDir != null) {
+                options.setCacheDir(modelCacheDir)
+                options.setModelToken(computeModelMd5())
+            }
+            options.setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND)
+            options.setHtpUseConvHmx(QnnDelegate.Options.HtpUseConvHmx.HTP_CONV_HMX_ON)
+            options.setHtpPerformanceMode(
+                QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_BURST
+            )
+            // INT8 quantized model: leave HtpPrecision unset so HTP picks the quantized path.
+            // Setting HTP_PRECISION_FP16 forces FP16 compute, which mismatches a QDQ-INT8 graph
+            // and causes "Failed to apply delegate" during Interpreter() construction.
+            Log.i(
+                TAG,
+                "[QNN_INIT] caps: HTP_QUANT=${QnnDelegate.checkCapability(QnnDelegate.Capability.HTP_RUNTIME_QUANTIZED)} " +
+                    "HTP_FP16=${QnnDelegate.checkCapability(QnnDelegate.Capability.HTP_RUNTIME_FP16)} " +
+                    "DSP=${QnnDelegate.checkCapability(QnnDelegate.Capability.DSP_RUNTIME)} " +
+                    "skelDir=$nativeLibraryDir cacheDir=$modelCacheDir"
+            )
+            QnnDelegate(options)
+        } catch (error: Throwable) {
+            _lastError.value =
+                "QNN delegate init failed: ${error.message ?: "unknown error"}"
+            null
+        }
+    }
+
+    private fun createQnnDelegate(): QnnDelegate? {
+        return qnnDelegateProvider?.invoke() ?: tryCreateQnnDelegate()
+    }
+
+    private fun tryCreateGpuDelegate(): GpuDelegate? {
+        return try {
+            val compatibility = CompatibilityList()
+            if (!compatibility.isDelegateSupportedOnThisDevice) {
+                _lastError.value = "GPU delegate unsupported on this device"
+                return null
+            }
+            buildSustainedSpeedGpuDelegate()
+        } catch (error: Throwable) {
+            _lastError.value =
+                "GPU delegate init failed: ${error.message ?: "unknown error"}"
+            null
+        }
+    }
+
+    private fun createGpuDelegate(): GpuDelegate? {
+        return gpuDelegateProvider?.invoke() ?: tryCreateGpuDelegate()
+    }
+
+    private fun logTfLiteRuntimeInfo(mode: InferenceMode) {
+        val runtimeInfo = try {
+            "runtime=${TensorFlowLite.runtimeVersion()} schema=${TensorFlowLite.schemaVersion()}"
+        } catch (_: Throwable) {
+            "runtime=unavailable schema=unavailable"
+        }
+        Log.i(TAG, "[INIT] mode=$mode TFLite $runtimeInfo")
+    }
+
+    private fun computeModelMd5(): String {
+        return try {
+            val buffer = modelBufferProvider?.invoke(InferenceMode.QNN_NPU) ?: return "model_unknown"
+            val duplicate = buffer.duplicate()
+            duplicate.position(0)
+            val bytes = ByteArray(duplicate.remaining())
+            duplicate.get(bytes)
+            MessageDigest.getInstance("MD5")
+                .digest(bytes)
+                .joinToString(separator = "") { "%02x".format(it) }
+        } catch (_: Throwable) {
+            "model_unknown"
+        }
+    }
+
+    private fun validateTensorContract(localInterpreter: InferenceEngine) {
+        val input = localInterpreter.inputTensor(0)
+        val output = localInterpreter.outputTensor(0)
+        val inputShape = input.shape
+        val outputShape = output.shape
+        val inputType = input.dataType
+        val outputType = output.dataType
 
         require(inputShape.contentEquals(intArrayOf(1, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, 3))) {
             "Unexpected input shape: ${inputShape.contentToString()}"
@@ -420,6 +613,40 @@ class FrameProcessor(
         }
     }
 
+    private fun validateQnnTensorContract(localInterpreter: InferenceEngine) {
+        val input = localInterpreter.inputTensor(0)
+        require(input.shape.contentEquals(intArrayOf(1, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE))) {
+            "QNN_NPU: unexpected input shape ${input.shape.contentToString()} - expected NCHW [1,3,640,640]"
+        }
+        require(input.dataType == DataType.INT8) {
+            "QNN_NPU: unexpected input dtype - expected INT8"
+        }
+
+        require(localInterpreter.outputTensorCount == 2) {
+            "QNN_NPU: expected 2 output tensors, got ${localInterpreter.outputTensorCount}"
+        }
+
+        val outputBoxes = localInterpreter.outputTensor(0)
+        val outputScores = localInterpreter.outputTensor(1)
+        require(outputBoxes.shape.contentEquals(intArrayOf(1, 4, OUTPUT_BOXES))) {
+            "QNN_NPU: unexpected output_0 shape ${outputBoxes.shape.contentToString()} - expected [1,4,8400]"
+        }
+        require(outputScores.shape.contentEquals(intArrayOf(1, 5, OUTPUT_BOXES))) {
+            "QNN_NPU: unexpected output_1 shape ${outputScores.shape.contentToString()} - expected [1,5,8400]"
+        }
+        require(outputBoxes.dataType == DataType.INT8) {
+            "QNN_NPU: output_0 dtype not INT8"
+        }
+        require(outputScores.dataType == DataType.INT8) {
+            "QNN_NPU: output_1 dtype not INT8"
+        }
+
+        // TODO: reuse existing arrays on QNN re-entry if we keep bouncing between modes.
+        qnnOutputBoxes = Array(1) { Array(4) { ByteArray(OUTPUT_BOXES) } }
+        qnnOutputScores = Array(1) { Array(CUSTOM_CLASS_NAMES.size) { ByteArray(OUTPUT_BOXES) } }
+        outputFormat = ModelOutputFormat.QNN_INT8_8400
+    }
+
     private fun closeInterpreterResources() {
         interpreter?.close()
         interpreter = null
@@ -427,12 +654,28 @@ class FrameProcessor(
         gpuDelegate = null
         nnApiDelegate?.close()
         nnApiDelegate = null
+        if (qnnDelegateCloseActionForTest != null) {
+            qnnDelegateCloseActionForTest?.invoke()
+        } else {
+            qnnDelegate?.close()
+        }
+        qnnDelegateCloseActionForTest = null
+        qnnDelegate = null
     }
+
+    private fun currentApiLevel(): Int = apiLevelOverrideForTest ?: Build.VERSION.SDK_INT
 
     private fun closePoseResources() {
         poseInterpreter?.close()
         poseInterpreter = null
     }
+
+    private data class YoloResult(
+        val boxes: List<DetectionBox>,
+        val preprocessMs: Double,
+        val inferenceMs: Double,
+        val nmsMs: Double
+    )
 
     private suspend fun processImage(image: ImageProxy) {
         try {
@@ -489,37 +732,11 @@ class FrameProcessor(
             try {
                 val rotatedWidth = rotatedBitmap.width
                 val rotatedHeight = rotatedBitmap.height
-                val yoloPreprocessStartNs = System.nanoTime()
-                yoloTensorImage.load(rotatedBitmap)
-                val tensorImage = yoloImageProcessor.process(yoloTensorImage)
-                val yoloPreprocessMs = elapsedMs(yoloPreprocessStartNs)
-
-                val inputBuffer = tensorImage.buffer
-                val boxes: List<DetectionBox>
-                val yoloInferenceMs: Double
-                val yoloNmsMs: Double
-                when (outputFormat) {
-                    ModelOutputFormat.RAW_8400 -> {
-                        for (row in outputTensorRaw[0]) row.fill(0f)
-                        val yoloInferenceStartNs = System.nanoTime()
-                        localInterpreter.run(inputBuffer, outputTensorRaw)
-                        yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
-
-                        val yoloNmsStartNs = System.nanoTime()
-                        boxes = parseModelOutput(outputTensorRaw, CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD)
-                        yoloNmsMs = elapsedMs(yoloNmsStartNs)
-                    }
-                    ModelOutputFormat.END_TO_END_300 -> {
-                        for (row in outputTensorE2E[0]) row.fill(0f)
-                        val yoloInferenceStartNs = System.nanoTime()
-                        localInterpreter.run(inputBuffer, outputTensorE2E)
-                        yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
-
-                        val yoloNmsStartNs = System.nanoTime()
-                        boxes = parseEndToEndOutput(outputTensorE2E, CONFIDENCE_THRESHOLD)
-                        yoloNmsMs = elapsedMs(yoloNmsStartNs)
-                    }
-                }
+                val yoloResult = runYolo(localInterpreter, rotatedBitmap)
+                val boxes = yoloResult.boxes
+                val yoloPreprocessMs = yoloResult.preprocessMs
+                val yoloInferenceMs = yoloResult.inferenceMs
+                val yoloNmsMs = yoloResult.nmsMs
                 lastInferenceMs.set(yoloInferenceMs)
                 var bestBallBox: DetectionBox? = null
                 for (box in boxes) {
@@ -572,6 +789,69 @@ class FrameProcessor(
         } finally {
             image.close()
         }
+    }
+
+    private fun runYolo(
+        localInterpreter: InferenceEngine,
+        rotatedBitmap: Bitmap
+    ): YoloResult {
+        val yoloPreprocessStartNs = System.nanoTime()
+        val inputBuffer = when (outputFormat) {
+            ModelOutputFormat.RAW_8400,
+            ModelOutputFormat.END_TO_END_300 -> {
+                yoloTensorImage.load(rotatedBitmap)
+                yoloImageProcessor.process(yoloTensorImage).buffer
+            }
+            ModelOutputFormat.QNN_INT8_8400 -> {
+                preprocessNchwInt8Manual(rotatedBitmap)
+            }
+        }
+        val yoloPreprocessMs = elapsedMs(yoloPreprocessStartNs)
+
+        val boxes: List<DetectionBox>
+        val yoloInferenceMs: Double
+        val yoloNmsMs: Double
+        when (outputFormat) {
+            ModelOutputFormat.RAW_8400 -> {
+                for (row in outputTensorRaw[0]) row.fill(0f)
+                val yoloInferenceStartNs = System.nanoTime()
+                localInterpreter.run(inputBuffer, outputTensorRaw)
+                yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                val yoloNmsStartNs = System.nanoTime()
+                boxes = parseModelOutput(outputTensorRaw, CONFIDENCE_THRESHOLD, NMS_IOU_THRESHOLD)
+                yoloNmsMs = elapsedMs(yoloNmsStartNs)
+            }
+            ModelOutputFormat.END_TO_END_300 -> {
+                for (row in outputTensorE2E[0]) row.fill(0f)
+                val yoloInferenceStartNs = System.nanoTime()
+                localInterpreter.run(inputBuffer, outputTensorE2E)
+                yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                val yoloNmsStartNs = System.nanoTime()
+                boxes = parseEndToEndOutput(outputTensorE2E, CONFIDENCE_THRESHOLD)
+                yoloNmsMs = elapsedMs(yoloNmsStartNs)
+            }
+            ModelOutputFormat.QNN_INT8_8400 -> {
+                val yoloInferenceStartNs = System.nanoTime()
+                localInterpreter.runForMultipleInputsOutputs(
+                    arrayOf<Any>(inputBuffer),
+                    mutableMapOf(0 to qnnOutputBoxes, 1 to qnnOutputScores)
+                )
+                yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
+
+                val yoloNmsStartNs = System.nanoTime()
+                boxes = decodeQnnOutput(NPU_CONFIDENCE_THRESHOLD, NPU_NMS_IOU_THRESHOLD)
+                yoloNmsMs = elapsedMs(yoloNmsStartNs)
+            }
+        }
+
+        return YoloResult(
+            boxes = boxes,
+            preprocessMs = yoloPreprocessMs,
+            inferenceMs = yoloInferenceMs,
+            nmsMs = yoloNmsMs
+        )
     }
 
     private fun runLivePoseIfGated(bitmap: Bitmap, boxes: List<DetectionBox>) {
@@ -720,6 +1000,88 @@ class FrameProcessor(
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun hasPoseInterpreterForTest(): Boolean = poseInterpreter != null
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun setQnnDelegateCloseActionForTest(action: (() -> Unit)?) {
+        qnnDelegateCloseActionForTest = action
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun setApiLevelOverrideForTest(apiLevel: Int?) {
+        apiLevelOverrideForTest = apiLevel
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun seedQnnOutputBuffersForTest(
+        boxes: Array<Array<ByteArray>>,
+        scores: Array<Array<ByteArray>>
+    ) {
+        require(
+            boxes.size == 1 &&
+                boxes[0].size == 4 &&
+                boxes[0].all { it.size == OUTPUT_BOXES }
+        ) {
+            "Unexpected boxes buffer shape"
+        }
+        require(
+            scores.size == 1 &&
+                scores[0].size == CUSTOM_CLASS_NAMES.size &&
+                scores[0].all { it.size == OUTPUT_BOXES }
+        ) {
+            "Unexpected scores buffer shape"
+        }
+        qnnOutputBoxes = Array(1) { index ->
+            Array(4) { channel -> boxes[index][channel].copyOf() }
+        }
+        qnnOutputScores = Array(1) { index ->
+            Array(CUSTOM_CLASS_NAMES.size) { channel -> scores[index][channel].copyOf() }
+        }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun decodeQnnOutputForTest(
+        confidenceThreshold: Float,
+        iouThreshold: Float
+    ): List<DetectionBox> = decodeQnnOutput(confidenceThreshold, iouThreshold)
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun validateQnnTensorContractForTest(engine: InferenceEngine) {
+        validateQnnTensorContract(engine)
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun setInferenceEngineForTest(engine: InferenceEngine, mode: InferenceMode) {
+        closeInterpreterResources()
+        interpreter = engine
+        currentMode.set(mode)
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun currentOutputFormatForTest(): ModelOutputFormat = outputFormat
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun qnnTensorShapesForTest(): Pair<IntArray, IntArray>? {
+        if (!::qnnOutputBoxes.isInitialized || !::qnnOutputScores.isInitialized) {
+            return null
+        }
+        val boxesShape = intArrayOf(
+            qnnOutputBoxes.size,
+            qnnOutputBoxes[0].size,
+            qnnOutputBoxes[0][0].size
+        )
+        val scoresShape = intArrayOf(
+            qnnOutputScores.size,
+            qnnOutputScores[0].size,
+            qnnOutputScores[0][0].size
+        )
+        return boxesShape to scoresShape
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun runYoloForTest(bitmap: Bitmap): List<DetectionBox> {
+        val localInterpreter = checkNotNull(interpreter) { "Inference engine not initialized" }
+        return runYolo(localInterpreter, bitmap).boxes
+    }
 
     private fun processPoseValidationIfNeeded(
         frameStartNs: Long,
@@ -897,6 +1259,85 @@ class FrameProcessor(
             .toList()
     }
 
+    internal fun qnnUnsigned(byte: Byte): Int = byte.toInt() + 128
+
+    private fun decodeQnnOutput(
+        confidenceThreshold: Float,
+        iouThreshold: Float
+    ): List<DetectionBox> {
+        check(::qnnOutputBoxes.isInitialized) {
+            "QNN output boxes buffer not initialized"
+        }
+        check(::qnnOutputScores.isInitialized) {
+            "QNN output scores buffer not initialized"
+        }
+
+        val perClassCandidates = mutableMapOf<Int, MutableList<DetectionBox>>()
+
+        for (candidateIndex in 0 until OUTPUT_BOXES) {
+            val cx = qnnUnsigned(qnnOutputBoxes[0][0][candidateIndex]) *
+                NPU_BOX_DEQUANT_SCALE / MODEL_INPUT_SIZE
+            val cy = qnnUnsigned(qnnOutputBoxes[0][1][candidateIndex]) *
+                NPU_BOX_DEQUANT_SCALE / MODEL_INPUT_SIZE
+            val w = qnnUnsigned(qnnOutputBoxes[0][2][candidateIndex]) *
+                NPU_BOX_DEQUANT_SCALE / MODEL_INPUT_SIZE
+            val h = qnnUnsigned(qnnOutputBoxes[0][3][candidateIndex]) *
+                NPU_BOX_DEQUANT_SCALE / MODEL_INPUT_SIZE
+
+            var bestClassId = -1
+            var bestScore = 0f
+            for (classIndex in CUSTOM_CLASS_NAMES.indices) {
+                val score =
+                    qnnUnsigned(qnnOutputScores[0][classIndex][candidateIndex]) *
+                        NPU_SCORE_DEQUANT_SCALE
+                if (score > bestScore) {
+                    bestScore = score
+                    bestClassId = classIndex
+                }
+            }
+
+            if (
+                bestScore < confidenceThreshold ||
+                bestClassId < 0 ||
+                bestClassId >= CUSTOM_CLASS_NAMES.size
+            ) {
+                continue
+            }
+
+            val left = (cx - w / 2f).coerceIn(0f, 1f)
+            val top = (cy - h / 2f).coerceIn(0f, 1f)
+            val right = (cx + w / 2f).coerceIn(0f, 1f)
+            val bottom = (cy + h / 2f).coerceIn(0f, 1f)
+            if (right <= left || bottom <= top) continue
+
+            perClassCandidates
+                .getOrPut(bestClassId) { mutableListOf() }
+                .add(
+                    DetectionBox(
+                        classId = bestClassId,
+                        label = classLabel(bestClassId),
+                        confidence = bestScore,
+                        left = left,
+                        top = top,
+                        right = right,
+                        bottom = bottom
+                    )
+                )
+        }
+
+        var results = perClassCandidates
+            .values
+            .asSequence()
+            .flatMap { nms(it, iouThreshold).asSequence() }
+            .sortedByDescending { it.confidence }
+            .toList()
+
+        if (results.size > NPU_MAX_DET) {
+            results = results.take(NPU_MAX_DET)
+        }
+        return results
+    }
+
     internal fun parseEndToEndOutput(
         output: Array<Array<FloatArray>>,
         confidenceThreshold: Float
@@ -932,6 +1373,56 @@ class FrameProcessor(
             )
         }
         return results.sortedByDescending { it.confidence }
+    }
+
+    internal fun preprocessNchwInt8Manual(bitmap: Bitmap): ByteBuffer {
+        val scaled = Bitmap.createScaledBitmap(bitmap, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, true)
+        val pixels = IntArray(MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
+        return try {
+            scaled.getPixels(
+                pixels,
+                0,
+                MODEL_INPUT_SIZE,
+                0,
+                0,
+                MODEL_INPUT_SIZE,
+                MODEL_INPUT_SIZE
+            )
+
+            ByteBuffer.allocateDirect(3 * MODEL_INPUT_SIZE * MODEL_INPUT_SIZE).apply {
+                for (pixel in pixels) {
+                    put(((pixel shr 16 and 0xFF) - 128).toByte())
+                }
+                for (pixel in pixels) {
+                    put(((pixel shr 8 and 0xFF) - 128).toByte())
+                }
+                for (pixel in pixels) {
+                    put(((pixel and 0xFF) - 128).toByte())
+                }
+                rewind()
+            }
+        } finally {
+            if (scaled !== bitmap) {
+                scaled.recycle()
+            }
+        }
+    }
+
+    // TODO: remove unused preprocessing variant - later cleanup (post Day 6.1)
+    internal fun preprocessNchwInt8Transpose(bitmap: Bitmap): ByteBuffer {
+        val floatArray = FloatArray(3 * MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
+        yoloTensorImage.load(bitmap)
+        yoloImageProcessor.process(yoloTensorImage).buffer.asFloatBuffer().get(floatArray)
+
+        val pixelCount = MODEL_INPUT_SIZE * MODEL_INPUT_SIZE
+        return ByteBuffer.allocateDirect(3 * pixelCount).apply {
+            for (channel in 0 until 3) {
+                for (index in 0 until pixelCount) {
+                    put(((floatArray[index * 3 + channel] * 255f).toInt() - 128).toByte())
+                }
+            }
+            rewind()
+        }
     }
 
     private fun nms(boxes: List<DetectionBox>, iouThreshold: Float): List<DetectionBox> {
@@ -1170,6 +1661,11 @@ class FrameProcessor(
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.40f
         private const val NMS_IOU_THRESHOLD = 0.50f
+        private const val NPU_CONFIDENCE_THRESHOLD = 0.30f
+        private const val NPU_NMS_IOU_THRESHOLD = 0.35f
+        private const val NPU_MAX_DET = 20
+        private const val NPU_BOX_DEQUANT_SCALE = 2.621687f
+        private const val NPU_SCORE_DEQUANT_SCALE = 0.00390625f
         private const val POSE_VISIBILITY_THRESHOLD = 0.60f
         private const val POSE_PRESENCE_THRESHOLD = 0.50f
         private const val BALL_CLASS_ID = 0
@@ -1181,7 +1677,6 @@ class FrameProcessor(
 
         private const val E2E_MAX_DETS = 300
         private const val E2E_FIELDS = 6
-
         private val VALID_ROTATIONS_DEGREES = setOf(0, 90, 180, 270)
         private val CUSTOM_CLASS_NAMES = arrayOf("ball", "made", "person", "rim", "shoot")
     }

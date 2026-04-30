@@ -14,6 +14,7 @@ import java.nio.channels.FileChannel
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -22,8 +23,10 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
+import org.tensorflow.lite.DataType
 import tech.apter.junit.jupiter.robolectric.RobolectricExtension
 
 @ExtendWith(RobolectricExtension::class)
@@ -118,6 +121,138 @@ class FrameProcessorTest {
             assertEquals(0.421875f, ball.top, 0.0001f)
             assertEquals(0.65625f, ball.right, 0.0001f)
             assertEquals(0.578125f, ball.bottom, 0.0001f)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun qnnUnsigned_mapsSignedByteRangeToZeroTo255() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            assertEquals(0, processor.qnnUnsigned((-128).toByte()))
+            assertEquals(127, processor.qnnUnsigned((-1).toByte()))
+            assertEquals(128, processor.qnnUnsigned(0.toByte()))
+            assertEquals(255, processor.qnnUnsigned(127.toByte()))
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun decodeQnnOutput_dequantsChannelsFirstBuffers_withoutSigmoid() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val prediction = QnnPrediction(
+            anchorIndex = 0,
+            cxNormalized = 0.50f,
+            cyNormalized = 0.40f,
+            wNormalized = 0.25f,
+            hNormalized = 0.125f,
+            classScores = mapOf(2 to 0.75f, 1 to 0.50f)
+        )
+
+        try {
+            val (boxesBuf, scoresBuf) = qnnBuffers(prediction)
+            processor.seedQnnOutputBuffersForTest(boxesBuf, scoresBuf)
+
+            val detections = processor.decodeQnnOutputForTest(
+                confidenceThreshold = 0.10f,
+                iouThreshold = 0.35f
+            )
+
+            assertEquals(1, detections.size)
+            val actual = detections.single()
+            val expectedCx = qnnBoxDequant(quantizeBox(prediction.cxNormalized))
+            val expectedCy = qnnBoxDequant(quantizeBox(prediction.cyNormalized))
+            val expectedW = qnnBoxDequant(quantizeBox(prediction.wNormalized))
+            val expectedH = qnnBoxDequant(quantizeBox(prediction.hNormalized))
+
+            assertEquals(2, actual.classId)
+            assertEquals("person", actual.label)
+            assertEquals(qnnScoreDequant(quantizeScore(0.75f)), actual.confidence, 0.0001f)
+            assertEquals((expectedCx - expectedW / 2f).coerceIn(0f, 1f), actual.left, 0.0001f)
+            assertEquals((expectedCy - expectedH / 2f).coerceIn(0f, 1f), actual.top, 0.0001f)
+            assertEquals((expectedCx + expectedW / 2f).coerceIn(0f, 1f), actual.right, 0.0001f)
+            assertEquals((expectedCy + expectedH / 2f).coerceIn(0f, 1f), actual.bottom, 0.0001f)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun decodeQnnOutput_filtersLowConfidence_andRejectsInvalidBoxes() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val lowConfidence = QnnPrediction(
+            anchorIndex = 0,
+            cxNormalized = 0.50f,
+            cyNormalized = 0.50f,
+            wNormalized = 0.20f,
+            hNormalized = 0.20f,
+            classScores = mapOf(0 to 0.05f)
+        )
+        val invalidGeometry = QnnPrediction(
+            anchorIndex = 1,
+            cxNormalized = 0f,
+            cyNormalized = 0f,
+            wNormalized = 0f,
+            hNormalized = 0.25f,
+            classScores = mapOf(0 to 0.90f)
+        )
+
+        try {
+            val (boxesBuf, scoresBuf) = qnnBuffers(lowConfidence, invalidGeometry)
+            processor.seedQnnOutputBuffersForTest(boxesBuf, scoresBuf)
+
+            val detections = processor.decodeQnnOutputForTest(
+                confidenceThreshold = 0.10f,
+                iouThreshold = 0.35f
+            )
+
+            assertTrue(detections.isEmpty())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun decodeQnnOutput_appliesPerClassNms() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val higherConfidence = QnnPrediction(
+            anchorIndex = 0,
+            cxNormalized = 0.50f,
+            cyNormalized = 0.50f,
+            wNormalized = 0.30f,
+            hNormalized = 0.30f,
+            classScores = mapOf(0 to 0.80f)
+        )
+        val lowerConfidence = QnnPrediction(
+            anchorIndex = 1,
+            cxNormalized = 0.52f,
+            cyNormalized = 0.52f,
+            wNormalized = 0.30f,
+            hNormalized = 0.30f,
+            classScores = mapOf(0 to 0.70f)
+        )
+
+        try {
+            val (boxesBuf, scoresBuf) = qnnBuffers(higherConfidence, lowerConfidence)
+            processor.seedQnnOutputBuffersForTest(boxesBuf, scoresBuf)
+
+            val detections = processor.decodeQnnOutputForTest(
+                confidenceThreshold = 0.10f,
+                iouThreshold = 0.35f
+            )
+
+            assertEquals(1, detections.size)
+            val actual = detections.single()
+            assertEquals(0, actual.classId)
+            assertEquals("ball", actual.label)
+            assertEquals(qnnScoreDequant(quantizeScore(0.80f)), actual.confidence, 0.0001f)
         } finally {
             processor.shutdown()
         }
@@ -541,6 +676,327 @@ class FrameProcessorTest {
         }
     }
 
+    @Test
+    fun switchInterpreter_qnnNpu_loadsInt8Model_notFp16() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val requestedModes = mutableListOf<InferenceMode>()
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = { mode ->
+                requestedModes += mode
+                createMappedByteBuffer()
+            },
+            gpuDelegateProvider = { null },
+            qnnDelegateProvider = { null },
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            processor.switchInterpreterForTest(InferenceMode.QNN_NPU)
+
+            assertTrue(requestedModes.isNotEmpty())
+            assertEquals(InferenceMode.QNN_NPU, requestedModes.first())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun switchInterpreter_qnnNpu_fallsBackToGpu_onApiBelow31() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val requestedModes = mutableListOf<InferenceMode>()
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = { mode ->
+                requestedModes += mode
+                createMappedByteBuffer()
+            },
+            gpuDelegateProvider = { null },
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            processor.setApiLevelOverrideForTest(29)
+            val switched = processor.switchInterpreterForTest(InferenceMode.QNN_NPU)
+
+            assertFalse(switched)
+            assertTrue(requestedModes.contains(InferenceMode.QNN_NPU))
+            assertTrue(requestedModes.contains(InferenceMode.GPU))
+            assertTrue(processor.lastError.value?.contains("API 31+") == true)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun switchInterpreter_qnnNpu_fallsBackToGpu_whenQnnDelegateFails() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val requestedModes = mutableListOf<InferenceMode>()
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = { mode ->
+                requestedModes += mode
+                createMappedByteBuffer()
+            },
+            gpuDelegateProvider = { null },
+            qnnDelegateProvider = { null },
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            val switched = processor.switchInterpreterForTest(InferenceMode.QNN_NPU)
+
+            assertFalse(switched)
+            assertTrue(requestedModes.contains(InferenceMode.QNN_NPU))
+            assertTrue(requestedModes.contains(InferenceMode.GPU))
+            assertTrue(processor.lastError.value?.contains("QNN delegate init failed") == true)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun closeInterpreterResources_closesQnnDelegate() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val closeCalls = AtomicInteger(0)
+
+        try {
+            processor.setQnnDelegateCloseActionForTest {
+                closeCalls.incrementAndGet()
+            }
+
+            processor.resetInterpreter()
+            testScheduler.runCurrent()
+
+            assertEquals(1, closeCalls.get())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun validateQnnTensorContract_acceptsExpectedInt8SplitOutputContract() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val engine = FakeInferenceEngine(
+            inputTensor = TensorContract(
+                shape = intArrayOf(1, 3, 640, 640),
+                dataType = DataType.INT8
+            ),
+            outputTensors = listOf(
+                TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8),
+                TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.INT8)
+            ),
+            onRunForMultipleInputsOutputs = { _, outputs ->
+                fillQnnTensor(outputs[0])
+                fillQnnTensor(outputs[1])
+            }
+        )
+
+        try {
+            processor.validateQnnTensorContractForTest(engine)
+
+            assertEquals(ModelOutputFormat.QNN_INT8_8400, processor.currentOutputFormatForTest())
+            val shapes = processor.qnnTensorShapesForTest()
+            requireNotNull(shapes)
+            assertTrue(shapes.first.contentEquals(intArrayOf(1, 4, OUTPUT_BOXES)))
+            assertTrue(shapes.second.contentEquals(intArrayOf(1, QNN_CLASS_COUNT, OUTPUT_BOXES)))
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun validateQnnTensorContract_rejectsUnexpectedInputOrOutputContract() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+
+        try {
+            val wrongInputShape = FakeInferenceEngine(
+                inputTensor = TensorContract(
+                    shape = intArrayOf(1, 640, 640, 3),
+                    dataType = DataType.INT8
+                ),
+                outputTensors = listOf(
+                    TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8),
+                    TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.INT8)
+                )
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                processor.validateQnnTensorContractForTest(wrongInputShape)
+            }
+
+            val wrongInputType = FakeInferenceEngine(
+                inputTensor = TensorContract(
+                    shape = intArrayOf(1, 3, 640, 640),
+                    dataType = DataType.FLOAT32
+                ),
+                outputTensors = listOf(
+                    TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8),
+                    TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.INT8)
+                )
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                processor.validateQnnTensorContractForTest(wrongInputType)
+            }
+
+            val wrongOutputCount = FakeInferenceEngine(
+                inputTensor = TensorContract(
+                    shape = intArrayOf(1, 3, 640, 640),
+                    dataType = DataType.INT8
+                ),
+                outputTensors = listOf(
+                    TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8)
+                )
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                processor.validateQnnTensorContractForTest(wrongOutputCount)
+            }
+
+            val wrongOutputShape = FakeInferenceEngine(
+                inputTensor = TensorContract(
+                    shape = intArrayOf(1, 3, 640, 640),
+                    dataType = DataType.INT8
+                ),
+                outputTensors = listOf(
+                    TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES - 1), dataType = DataType.INT8),
+                    TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.INT8)
+                )
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                processor.validateQnnTensorContractForTest(wrongOutputShape)
+            }
+
+            val wrongOutputType = FakeInferenceEngine(
+                inputTensor = TensorContract(
+                    shape = intArrayOf(1, 3, 640, 640),
+                    dataType = DataType.INT8
+                ),
+                outputTensors = listOf(
+                    TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8),
+                    TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.FLOAT32)
+                )
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                processor.validateQnnTensorContractForTest(wrongOutputType)
+            }
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun processImage_qnnInt8Branch_usesRunForMultipleInputsOutputs() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val engine = FakeInferenceEngine(
+            inputTensor = TensorContract(
+                shape = intArrayOf(1, 3, 640, 640),
+                dataType = DataType.INT8
+            ),
+            outputTensors = listOf(
+                TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8),
+                TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.INT8)
+            ),
+            onRunForMultipleInputsOutputs = { _, outputs ->
+                assertQnnOutputTensorShape(
+                    outputs[0],
+                    expectedChannels = 4
+                )
+                assertQnnOutputTensorShape(
+                    outputs[1],
+                    expectedChannels = QNN_CLASS_COUNT
+                )
+            }
+        )
+        val bitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            processor.validateQnnTensorContractForTest(engine)
+            processor.setInferenceEngineForTest(engine, InferenceMode.QNN_NPU)
+
+            processor.runYoloForTest(bitmap)
+
+            assertEquals(0, engine.runCalls)
+            assertEquals(1, engine.runForMultipleInputsOutputsCalls)
+            assertEquals(1, engine.lastMultiInputs?.size)
+        } finally {
+            bitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun processImage_qnnInt8Branch_decodesSeededBuffers() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val prediction = QnnPrediction(
+            anchorIndex = 0,
+            cxNormalized = 0.50f,
+            cyNormalized = 0.40f,
+            wNormalized = 0.25f,
+            hNormalized = 0.125f,
+            classScores = mapOf(2 to 0.75f, 1 to 0.50f)
+        )
+        val expected = DetectionBox(
+            classId = 2,
+            label = "person",
+            confidence = qnnScoreDequant(quantizeScore(0.75f)),
+            left = (qnnBoxDequant(quantizeBox(prediction.cxNormalized)) -
+                qnnBoxDequant(quantizeBox(prediction.wNormalized)) / 2f).coerceIn(0f, 1f),
+            top = (qnnBoxDequant(quantizeBox(prediction.cyNormalized)) -
+                qnnBoxDequant(quantizeBox(prediction.hNormalized)) / 2f).coerceIn(0f, 1f),
+            right = (qnnBoxDequant(quantizeBox(prediction.cxNormalized)) +
+                qnnBoxDequant(quantizeBox(prediction.wNormalized)) / 2f).coerceIn(0f, 1f),
+            bottom = (qnnBoxDequant(quantizeBox(prediction.cyNormalized)) +
+                qnnBoxDequant(quantizeBox(prediction.hNormalized)) / 2f).coerceIn(0f, 1f)
+        )
+        val seededBuffers = qnnBuffers(prediction)
+        val engine = FakeInferenceEngine(
+            inputTensor = TensorContract(
+                shape = intArrayOf(1, 3, 640, 640),
+                dataType = DataType.INT8
+            ),
+            outputTensors = listOf(
+                TensorContract(shape = intArrayOf(1, 4, OUTPUT_BOXES), dataType = DataType.INT8),
+                TensorContract(shape = intArrayOf(1, 5, OUTPUT_BOXES), dataType = DataType.INT8)
+            ),
+            onRunForMultipleInputsOutputs = { _, outputs ->
+                copyIntoQnnTensor(
+                    source = seededBuffers.first,
+                    destination = outputs[0]
+                )
+                copyIntoQnnTensor(
+                    source = seededBuffers.second,
+                    destination = outputs[1]
+                )
+            }
+        )
+        val bitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            processor.validateQnnTensorContractForTest(engine)
+            processor.setInferenceEngineForTest(engine, InferenceMode.QNN_NPU)
+
+            val detections = processor.runYoloForTest(bitmap)
+
+            assertEquals(1, detections.size)
+            val actual = detections.single()
+            assertEquals(expected.classId, actual.classId)
+            assertEquals(expected.label, actual.label)
+            assertEquals(expected.confidence, actual.confidence, 0.0001f)
+            assertEquals(expected.left, actual.left, 0.0001f)
+            assertEquals(expected.top, actual.top, 0.0001f)
+            assertEquals(expected.right, actual.right, 0.0001f)
+            assertEquals(expected.bottom, actual.bottom, 0.0001f)
+            assertEquals(1, engine.runForMultipleInputsOutputsCalls)
+        } finally {
+            bitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
     private fun frame(id: Int) = FramePacket(
         timestampNs = id.toLong(),
         width = 1280,
@@ -560,6 +1016,74 @@ class FrameProcessorTest {
         }
         return output
     }
+
+    private fun qnnBuffers(
+        vararg predictions: QnnPrediction
+    ): Pair<Array<Array<ByteArray>>, Array<Array<ByteArray>>> {
+        val boxes = Array(1) { Array(4) { ByteArray(OUTPUT_BOXES) { (-128).toByte() } } }
+        val scores = Array(1) {
+            Array(QNN_CLASS_COUNT) { ByteArray(OUTPUT_BOXES) { (-128).toByte() } }
+        }
+
+        predictions.forEach { prediction ->
+            val anchor = prediction.anchorIndex
+            boxes[0][0][anchor] = quantizeBox(prediction.cxNormalized)
+            boxes[0][1][anchor] = quantizeBox(prediction.cyNormalized)
+            boxes[0][2][anchor] = quantizeBox(prediction.wNormalized)
+            boxes[0][3][anchor] = quantizeBox(prediction.hNormalized)
+            prediction.classScores.forEach { (classId, score) ->
+                scores[0][classId][anchor] = quantizeScore(score)
+            }
+        }
+
+        return boxes to scores
+    }
+
+    private fun assertQnnOutputTensorShape(output: Any?, expectedChannels: Int) {
+        val tensor = output as Array<*>
+        assertEquals(1, tensor.size)
+        val channels = tensor[0] as Array<*>
+        assertEquals(expectedChannels, channels.size)
+        channels.forEach { channel ->
+            assertEquals(OUTPUT_BOXES, (channel as ByteArray).size)
+        }
+    }
+
+    private fun copyIntoQnnTensor(
+        source: Array<Array<ByteArray>>,
+        destination: Any?
+    ) {
+        val target = destination as Array<*>
+        val targetChannels = target[0] as Array<*>
+        source[0].forEachIndexed { channelIndex, values ->
+            values.copyInto(targetChannels[channelIndex] as ByteArray)
+        }
+    }
+
+    private fun fillQnnTensor(destination: Any?) {
+        val target = destination as Array<*>
+        val targetChannels = target[0] as Array<*>
+        targetChannels.forEach { channel ->
+            (channel as ByteArray).fill((-128).toByte())
+        }
+    }
+
+    private fun quantizeBox(normalized: Float): Byte {
+        val pixelSpace = normalized * MODEL_INPUT_SIZE
+        val unsigned = (pixelSpace / NPU_BOX_DEQUANT_SCALE).roundToInt().coerceIn(0, 255)
+        return (unsigned - 128).toByte()
+    }
+
+    private fun quantizeScore(score: Float): Byte {
+        val unsigned = (score / NPU_SCORE_DEQUANT_SCALE).roundToInt().coerceIn(0, 255)
+        return (unsigned - 128).toByte()
+    }
+
+    private fun qnnBoxDequant(byte: Byte): Float =
+        ((byte.toInt() + 128) * NPU_BOX_DEQUANT_SCALE) / MODEL_INPUT_SIZE
+
+    private fun qnnScoreDequant(byte: Byte): Float =
+        (byte.toInt() + 128) * NPU_SCORE_DEQUANT_SCALE
 
     private fun baseBox() = DetectionBox(
         classId = 0,
@@ -654,6 +1178,63 @@ class FrameProcessorTest {
         val classId: Int,
         val confidence: Float
     )
+
+    private data class QnnPrediction(
+        val anchorIndex: Int,
+        val cxNormalized: Float,
+        val cyNormalized: Float,
+        val wNormalized: Float,
+        val hNormalized: Float,
+        val classScores: Map<Int, Float>
+    )
+
+    private companion object {
+        private const val OUTPUT_BOXES = 8400
+        private const val MODEL_INPUT_SIZE = 640f
+        private const val QNN_CLASS_COUNT = 5
+        private const val NPU_BOX_DEQUANT_SCALE = 2.621687f
+        private const val NPU_SCORE_DEQUANT_SCALE = 0.00390625f
+    }
+}
+
+private class FakeInferenceEngine(
+    private val inputTensor: TensorContract,
+    private val outputTensors: List<TensorContract>,
+    private val onRun: ((Any, Any) -> Unit)? = null,
+    private val onRunForMultipleInputsOutputs: ((Array<Any>, MutableMap<Int, Any>) -> Unit)? = null
+) : InferenceEngine {
+    var runCalls: Int = 0
+        private set
+    var runForMultipleInputsOutputsCalls: Int = 0
+        private set
+    var lastMultiInputs: Array<Any>? = null
+        private set
+    val closed = AtomicBoolean(false)
+
+    override val outputTensorCount: Int
+        get() = outputTensors.size
+
+    override fun inputTensor(index: Int): TensorContract {
+        require(index == 0)
+        return inputTensor
+    }
+
+    override fun outputTensor(index: Int): TensorContract = outputTensors[index]
+
+    override fun run(input: Any, output: Any) {
+        runCalls += 1
+        onRun?.invoke(input, output)
+    }
+
+    override fun runForMultipleInputsOutputs(inputs: Array<Any>, outputs: MutableMap<Int, Any>) {
+        runForMultipleInputsOutputsCalls += 1
+        lastMultiInputs = inputs
+        onRunForMultipleInputsOutputs?.invoke(inputs, outputs)
+    }
+
+    override fun close() {
+        closed.set(true)
+    }
 }
 
 private class FakeImageProxy : ImageProxy {

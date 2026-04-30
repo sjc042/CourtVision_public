@@ -22,6 +22,8 @@ import com.courtvision.spike.pipeline.PoseResult
 import com.courtvision.spike.pipeline.PoseStageLatency
 import com.courtvision.spike.pipeline.PoseWorldLandmark
 import com.courtvision.spike.pipeline.PoseTensorContract
+import com.courtvision.spike.pipeline.QnnProbeResult
+import com.courtvision.spike.pipeline.QnnStatus
 import com.courtvision.spike.pipeline.RotationTelemetry
 import com.courtvision.spike.pipeline.CropRectNormalized
 import com.courtvision.spike.pipeline.TrackingLogger
@@ -335,6 +337,118 @@ class CameraViewModelTest {
                 "FAILED: start inference first",
                 viewModel.uiState.value.poseValidationStatus
             )
+        } finally {
+            handle.store.clear()
+        }
+    }
+
+    @Test
+    fun modelAssetPathForMode_routesQnnToInt8Asset_andOtherModesToSelectedModel() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            nnApiProbeResult = NNAPI_AVAILABLE
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            assertEquals(MODEL_A, viewModel.modelAssetPathForMode(InferenceMode.CPU))
+            assertEquals(MODEL_A, viewModel.modelAssetPathForMode(InferenceMode.GPU))
+            assertEquals(MODEL_A, viewModel.modelAssetPathForMode(InferenceMode.NNAPI))
+            assertEquals(
+                "spike_qai_yolo11n_640_5-class_04-28-2026_int8.tflite",
+                viewModel.modelAssetPathForMode(InferenceMode.QNN_NPU)
+            )
+        } finally {
+            handle.store.clear()
+        }
+    }
+
+    @Test
+    fun qnnProbeSupportedAndQuantized_setsQnnAvailableTrue() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            qnnProbeResult = QnnProbeResult(
+                status = QnnStatus.QNN_SUPPORTED,
+                htpQuantizedSupported = true
+            ),
+            nnApiProbeResult = NNAPI_AVAILABLE
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            assertTrue(viewModel.uiState.value.qnnAvailable)
+            assertEquals(QnnStatus.QNN_SUPPORTED, viewModel.uiState.value.qnnProbeResult.status)
+        } finally {
+            handle.store.clear()
+        }
+    }
+
+    @Test
+    fun qnnProbeSupportedButFp16Only_setsQnnAvailableFalse() {
+        val fakeProcessor = FakeFrameProcessor()
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            qnnProbeResult = QnnProbeResult(
+                status = QnnStatus.QNN_SUPPORTED,
+                htpFp16Supported = true,
+                htpQuantizedSupported = false
+            ),
+            nnApiProbeResult = NNAPI_AVAILABLE
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            assertEquals(false, viewModel.uiState.value.qnnAvailable)
+            assertEquals(true, viewModel.uiState.value.qnnProbeResult.htpFp16Supported)
+            assertEquals(false, viewModel.uiState.value.qnnProbeResult.htpQuantizedSupported)
+        } finally {
+            handle.store.clear()
+        }
+    }
+
+    @Test
+    fun qnnProbeFailure_setsQnnAvailableFalse_andStoresProbeResult() {
+        val fakeProcessor = FakeFrameProcessor()
+        val probeResult = QnnProbeResult(
+            status = QnnStatus.QNN_INIT_FAILED,
+            reason = "probe failure"
+        )
+        CameraViewModel.testOverrides = CameraViewModel.TestOverrides(
+            frameProcessor = fakeProcessor,
+            performanceLogger = FakePerformanceLogger(),
+            trackingLogger = FakeTrackingLogger(),
+            modelPaths = listOf(MODEL_A),
+            initialModelPath = MODEL_A,
+            gpuProbeResult = GpuProbeResult(status = GpuStatus.GPU_SUPPORTED),
+            qnnProbeResult = probeResult,
+            nnApiProbeResult = NNAPI_AVAILABLE
+        )
+        val handle = createViewModel()
+        val viewModel = handle.viewModel
+
+        try {
+            assertEquals(false, viewModel.uiState.value.qnnAvailable)
+            assertEquals(probeResult, viewModel.uiState.value.qnnProbeResult)
         } finally {
             handle.store.clear()
         }

@@ -29,6 +29,9 @@ import com.courtvision.spike.pipeline.PerFramePerfRow
 import com.courtvision.spike.pipeline.PoseFrameResult
 import com.courtvision.spike.pipeline.PoseImageLandmark
 import com.courtvision.spike.pipeline.PoseTensorContract
+import com.courtvision.spike.pipeline.QnnDelegateProbe
+import com.courtvision.spike.pipeline.QnnProbeResult
+import com.courtvision.spike.pipeline.QnnStatus
 import com.courtvision.spike.pipeline.RotationTelemetry
 import com.courtvision.spike.pipeline.SpikeImageAnalyzer
 import com.courtvision.spike.pipeline.TrackingCsvLogger
@@ -85,6 +88,8 @@ class CameraViewModel(
             scope = viewModelScope,
             modelBufferProvider = ::loadModelBuffer,
             poseModelBufferProvider = ::loadPoseModelBuffer,
+            nativeLibraryDir = application.applicationInfo.nativeLibraryDir,
+            modelCacheDir = application.cacheDir.absolutePath,
             thermalStatusProvider = {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                     "UNKNOWN"
@@ -112,7 +117,9 @@ class CameraViewModel(
     val rotationTelemetry: StateFlow<RotationTelemetry> = frameProcessor.rotationTelemetry
 
     @Volatile
-    private var cachedModelBuffer: MappedByteBuffer? = null
+    private var cachedSelectedModelBuffer: MappedByteBuffer? = null
+    @Volatile
+    private var cachedQnnModelBuffer: MappedByteBuffer? = null
     @Volatile
     private var cachedPoseModelBuffer: MappedByteBuffer? = null
 
@@ -122,10 +129,14 @@ class CameraViewModel(
         // Phase 0 decision: keep probes synchronous in init for deterministic startup behavior.
         // Phase 2 note: move delegate probes to Dispatchers.Default to avoid any JNI work on Main.
         val probeResult = overrides?.gpuProbeResult ?: GpuDelegateProbe.probe()
+        val qnnResult = overrides?.qnnProbeResult ?: QnnDelegateProbe.probe()
         val nnApiResult = overrides?.nnApiProbeResult ?: NnApiDelegateProbe.probe()
         _uiState.update {
             it.copy(
                 gpuProbeResult = probeResult,
+                qnnProbeResult = qnnResult,
+                qnnAvailable = qnnResult.status == QnnStatus.QNN_SUPPORTED &&
+                    qnnResult.htpQuantizedSupported,
                 nnApiProbeResult = nnApiResult,
                 nnApiAvailable = nnApiResult.startsWith("NNAPI_AVAILABLE")
             )
@@ -299,7 +310,7 @@ class CameraViewModel(
             )
         }
         selectedModelPath = modelPath
-        cachedModelBuffer = null
+        cachedSelectedModelBuffer = null
         frameProcessor.resetInterpreter()
 
         _uiState.update {
@@ -325,7 +336,8 @@ class CameraViewModel(
     fun restartSession() {
         poseValidationCollectorJob?.cancel()
         poseValidationCollectorJob = null
-        cachedModelBuffer = null
+        cachedSelectedModelBuffer = null
+        cachedQnnModelBuffer = null
         frameProcessor.resetInterpreter()
         _uiState.update { state ->
             state.copy(
@@ -446,12 +458,24 @@ class CameraViewModel(
         }
     }
 
-    private fun loadModelBuffer(): MappedByteBuffer {
-        cachedModelBuffer?.let { return it }
+    private fun loadModelBuffer(mode: InferenceMode): MappedByteBuffer {
+        val assetPath = modelAssetPathForMode(mode)
+        val cachedBuffer = if (mode == InferenceMode.QNN_NPU) {
+            cachedQnnModelBuffer
+        } else {
+            cachedSelectedModelBuffer
+        }
+        cachedBuffer?.let { return it }
+
         synchronized(this) {
-            cachedModelBuffer?.let { return it }
-            val selectedPath = selectedModelPath
-            val mapped = getApplication<Application>().assets.openFd(selectedPath).use { assetFile ->
+            val existingBuffer = if (mode == InferenceMode.QNN_NPU) {
+                cachedQnnModelBuffer
+            } else {
+                cachedSelectedModelBuffer
+            }
+            existingBuffer?.let { return it }
+
+            val mapped = getApplication<Application>().assets.openFd(assetPath).use { assetFile ->
                 FileInputStream(assetFile.fileDescriptor).channel.use { channel ->
                     channel.map(
                         FileChannel.MapMode.READ_ONLY,
@@ -460,8 +484,21 @@ class CameraViewModel(
                     )
                 }
             }
-            cachedModelBuffer = mapped
+            if (mode == InferenceMode.QNN_NPU) {
+                cachedQnnModelBuffer = mapped
+            } else {
+                cachedSelectedModelBuffer = mapped
+            }
             return mapped
+        }
+    }
+
+    internal fun modelAssetPathForMode(mode: InferenceMode): String {
+        return when (mode) {
+            InferenceMode.QNN_NPU -> QNN_MODEL_ASSET_PATH
+            InferenceMode.CPU,
+            InferenceMode.GPU,
+            InferenceMode.NNAPI -> selectedModelPath
         }
     }
 
@@ -524,7 +561,12 @@ class CameraViewModel(
 
             val p95Inference = percentile(poseInferenceSamples, 0.95)
             val selectedMode = _uiState.value.selectedMode
-            val gpuModeForSummary = if (selectedMode == InferenceMode.CPU) "CPU" else "GPU"
+            val gpuModeForSummary = when (selectedMode) {
+                InferenceMode.CPU -> "CPU"
+                InferenceMode.GPU -> "GPU"
+                InferenceMode.NNAPI -> "NNAPI"
+                InferenceMode.QNN_NPU -> "QNN_NPU"
+            }
             val thermalStatusForSummary = readThermalStatus()
             val summaryLines = listOf(
                 "device=${Build.MODEL}",
@@ -819,6 +861,7 @@ class CameraViewModel(
 
     companion object {
         private const val DEFAULT_MODEL_ASSET_PATH = "yolo11n_640_5-class_04-01-2026_saved_model/yolo11n_640_5-class_04-01-2026_float16.tflite"
+        private const val QNN_MODEL_ASSET_PATH = "spike_qai_yolo11n_640_5-class_04-28-2026_int8.tflite"
         private const val POSE_MODEL_ASSET_PATH = "pose_landmarks_detector.tflite"
         private const val POSE_OUTPUT_FOLDER_NAME = "pose_validation"
         private const val POSE_RUN_TAG = "CVPoseDay5"
@@ -840,6 +883,7 @@ class CameraViewModel(
         val modelPaths: List<String>? = null,
         val initialModelPath: String? = null,
         val gpuProbeResult: GpuProbeResult? = null,
+        val qnnProbeResult: QnnProbeResult? = null,
         val nnApiProbeResult: String? = null,
         val poseOutputRootProvider: (() -> File?)? = null
     )

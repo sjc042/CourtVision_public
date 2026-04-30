@@ -104,7 +104,7 @@ Branching rule:
 - Branch: `perf/day6-1-qnn-npu-pipeline`
 - Plan: `docs/plans/day6-1-qnn-npu-pipeline.md`
 - Gaps addressed: Gap 1 (QNN NPU delegate)
-- Prerequisites: Day 6.2 merged or available; S22+ available; QNN dependencies added; `nativeLibraryDir` and `modelCacheDir` wiring ready
+- Prerequisites: Day 6.2 merged or available; S22+ available; QNN dependencies added; `nativeLibraryDir` and `modelCacheDir` wiring ready — **Step 0 prerequisite met (INT8 model ready 2026-04-28)**
 - Expected outcome: YOLO moves from GPU to Hexagon HTP and becomes the primary latency reduction path
 - Validation gate summary: QNN probe succeeds on S22+; `QNN_NPU` mode switches cleanly; CSV records `gpu_mode=QNN_NPU`; benchmark determines whether INT8 is needed later
 
@@ -157,6 +157,6 @@ Acceptance checkpoints:
 ## Out of Scope / Deferred
 
 - Gap 6 (rotate-after-resize) remains deferred
-- INT8 path remains conditional on the Day 6.1 FP16 result
+- INT8 path confirmed: split-output w8a8 model validated 2026-04-28 (run `spike_qai_yolo11n_640_5-class_04-28-2026_int8_14`, mAP50=0.9143); FP16 GPU asset remains active for non-QNN delegates
 - full removal of `InferenceMode.NNAPI` remains a later cleanup, not part of this queue
 - Shot detection FSM remains Day 7 work, not part of Day 6.x perf follow-up

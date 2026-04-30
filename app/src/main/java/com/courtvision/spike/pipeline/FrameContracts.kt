@@ -44,10 +44,26 @@ data class GpuProbeResult(
     val apiLevel: Int = 0
 )
 
+enum class QnnStatus {
+    QNN_SUPPORTED,
+    QNN_UNSUPPORTED,
+    QNN_INIT_FAILED
+}
+
+data class QnnProbeResult(
+    val status: QnnStatus = QnnStatus.QNN_UNSUPPORTED,
+    val htpFp16Supported: Boolean = false,
+    val htpQuantizedSupported: Boolean = false,
+    val reason: String? = null,
+    val deviceModel: String = "",
+    val apiLevel: Int = 0
+)
+
 enum class InferenceMode {
     CPU,
     GPU,
-    NNAPI
+    NNAPI,
+    QNN_NPU
 }
 
 enum class PoseGatingMode {

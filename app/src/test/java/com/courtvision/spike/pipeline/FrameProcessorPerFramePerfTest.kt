@@ -88,6 +88,32 @@ class FrameProcessorPerFramePerfTest {
         }
     }
 
+    @Test
+    fun appendPerFramePerfRow_gpuMode_isQnnNpu() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val fakeLogger = FakePerFramePerfLogger()
+        val processor = FrameProcessor(
+            scope = this,
+            consumerDispatcher = dispatcher,
+            perFrameLogger = fakeLogger
+        )
+
+        try {
+            processor.forceCurrentInferenceModeForTest(InferenceMode.QNN_NPU)
+            processor.emitPerFrameRowForTest(
+                frameTotalMs = 20.0,
+                yoloPreprocessMs = 3.0,
+                yoloInferenceMs = 8.0,
+                yoloNmsMs = 1.0
+            )
+
+            assertEquals(1, fakeLogger.rows.size)
+            assertEquals("QNN_NPU", fakeLogger.rows.first().gpuMode)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
     private fun personBox() = DetectionBox(
         classId = 2,
         label = "person",

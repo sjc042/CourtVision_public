@@ -108,6 +108,8 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("com.qualcomm.qti:qnn-runtime:2.40.0")
+    implementation("com.qualcomm.qti:qnn-litert-delegate:2.40.0")
 
     implementation("com.google.android.material:material:1.12.0")
 

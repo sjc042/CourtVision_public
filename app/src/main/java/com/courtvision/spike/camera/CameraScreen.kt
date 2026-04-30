@@ -534,6 +534,13 @@ private fun MetricsOverlay(
             overflow = TextOverflow.Ellipsis
         )
         Text(
+            "QNN: ${uiState.qnnProbeResult.status} HTP_QUANT=${uiState.qnnProbeResult.htpQuantizedSupported}",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
             "Device: ${uiState.gpuProbeResult.deviceModel} | API ${uiState.gpuProbeResult.apiLevel}",
             color = Color.White,
             style = MaterialTheme.typography.bodySmall,
@@ -660,6 +667,7 @@ private fun MetricsOverlay(
         InferenceModeSelector(
             selectedMode = uiState.selectedMode,
             nnapiAvailable = uiState.nnApiAvailable,
+            qnnAvailable = uiState.qnnAvailable,
             onModeSelect = onModeSelect
         )
         ModelSelector(
@@ -702,6 +710,7 @@ private fun LogarithmicNoiseSlider(
 private fun InferenceModeSelector(
     selectedMode: InferenceMode,
     nnapiAvailable: Boolean,
+    qnnAvailable: Boolean,
     onModeSelect: (InferenceMode) -> Unit
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -720,6 +729,12 @@ private fun InferenceModeSelector(
             selected = selectedMode == InferenceMode.NNAPI,
             enabled = nnapiAvailable,
             onClick = { onModeSelect(InferenceMode.NNAPI) }
+        )
+        ModeButton(
+            label = "NPU",
+            selected = selectedMode == InferenceMode.QNN_NPU,
+            enabled = qnnAvailable,
+            onClick = { onModeSelect(InferenceMode.QNN_NPU) }
         )
     }
 }

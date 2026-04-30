@@ -278,20 +278,20 @@ GC pressure, move to bitmap pooling in Phase 2.
 - **`.task` bundle extraction**: `pose_landmarks_detector.tflite` must be extracted from the MediaPipe `.task` archive and bundled separately in `assets/`. This is a build-time step, not a runtime concern, but must be documented in the build README.
 - **Pose accuracy when person bbox is partial**: If the shooter is near the frame edge and YOLO's `person` box clips limbs, landmark accuracy degrades. Monitor via `visibility` field on each landmark; gate angle computation on `visibility > 0.6`.
 
-### Deferred (Phase 2)
+### Deferred (Phase 2) / In Progress
 
-- **QAI Hub NPU compilation via QNN delegate**: The Hexagon NPU on Qualcomm SoCs is accessed through the QNN TFLite delegate (`com.qualcomm.qti:qnn-tflite-delegate` AAR + `libQnnTFLiteDelegate.so`), **not** through NNAPI. NNAPI on Qualcomm devices routes to CPU/GPU via the Android HAL — it does not reach the Hexagon NPU. The existing `InferenceMode.NNAPI` in the codebase is therefore a lateral CPU/GPU path, not a stepping stone to NPU acceleration.
+- **QAI Hub NPU compilation via QNN delegate**: The Hexagon NPU on Qualcomm SoCs is accessed through the QNN TFLite delegate (`com.qualcomm.qti:qnn-litert-delegate` AAR + `libQnnTFLiteDelegate.so`), **not** through NNAPI. NNAPI on Qualcomm devices routes to CPU/GPU via the Android HAL — it does not reach the Hexagon NPU. The existing `InferenceMode.NNAPI` in the codebase is therefore a lateral CPU/GPU path, not a stepping stone to NPU acceleration.
 
   **Phase 2 delegate matrix:**
 
-  | Config | YOLO delegate | Pose delegate | New dependency | Rationale |
-  |--------|--------------|---------------|----------------|-----------|
-  | A (Phase 0, this ADR) | GPU | GPU | None | Default spike path |
-  | B (recommended) | QNN → NPU | GPU | QAI Hub INT8 YOLO + QNN AAR | Offloads heavy model (~25–35ms GPU → sub-5ms NPU on SD 8 Gen 2+), frees GPU for pose |
-  | C (alternative) | GPU | QNN → NPU | QAI Hub INT8 pose + QNN AAR | If pose is the bottleneck instead |
-  | D (fallback) | GPU | CPU (4 threads) | None | If sequential GPU fails latency gate |
+  | Config | YOLO delegate | Pose delegate | New dependency | Status |
+  |--------|--------------|---------------|----------------|--------|
+  | A (Phase 0, this ADR) | GPU | GPU | None | ✅ Active |
+  | B | QNN → NPU | GPU | QAI Hub INT8 YOLO + QNN AAR | 🔄 **In progress (Day 6.1)** |
+  | C | GPU | QNN → NPU | QAI Hub INT8 pose + QNN AAR | Deferred — pose p95=15ms, not bottleneck |
+  | D (fallback) | GPU | CPU (4 threads) | None | Fallback if GPU fails latency gate |
 
-  Config B is the highest-priority optimization: moving the larger model to dedicated hardware frees ~80% of the GPU frame budget. Requires w8a8 post-training quantization of the YOLO model via QAI Hub, plus accuracy validation that 5-class mAP does not regress. The QNN delegate performs on-device Hexagon graph compilation at model load time — expect increased cold-start latency (~1–3s additional).
+  **Config B update (2026-04-28):** INT8 YOLO model validated — `spike_qai_yolo11n_640_5-class_04-28-2026_int8.tflite`, mAP50=0.9143. Plan: [`docs/plans/day6-1-qnn-npu-pipeline.md`](../plans/day6-1-qnn-npu-pipeline.md). Output contract: [ADR-007](007-tflite-npu-split-output-contract.md) — INT8 exports require split output heads `(1,4,8400)` + `(1,5,8400)` (combined `(1,9,8400)` collapses class scores to zero under per-tensor INT8 quantization).
 
 - **ARCore depth intrinsics**: Replace monocular Z estimate with camera-calibrated back-projection for accurate wrist-to-camera distance. Required for full perspective correction of the shot arc parabola fit.
 - **Physics-informed post-processing**: Bone-length-constrained Kalman smoothing (94.3% variance reduction vs. raw BlazePose world coordinates) for more stable joint angle time series.
