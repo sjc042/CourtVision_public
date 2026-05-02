@@ -997,6 +997,27 @@ class FrameProcessorTest {
         }
     }
 
+    @Test
+    fun preprocessNchwInt8Manual_reusesFrameProcessorBuffer() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(scope = this, consumerDispatcher = dispatcher)
+        val firstBitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+        val secondBitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
+
+        try {
+            val first = processor.preprocessNchwInt8Manual(firstBitmap)
+            val second = processor.preprocessNchwInt8Manual(secondBitmap)
+
+            assertSame(first, second)
+            assertEquals(0, second.position())
+            assertEquals(3 * 640 * 640, second.capacity())
+        } finally {
+            firstBitmap.recycle()
+            secondBitmap.recycle()
+            processor.shutdown()
+        }
+    }
+
     private fun frame(id: Int) = FramePacket(
         timestampNs = id.toLong(),
         width = 1280,

@@ -1,6 +1,8 @@
 package com.courtvision.spike.pipeline
 
 import android.graphics.Bitmap
+import java.nio.ByteBuffer
+import java.nio.MappedByteBuffer
 import kotlin.math.exp
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
@@ -8,7 +10,6 @@ import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
-import java.nio.MappedByteBuffer
 
 class PoseLandmarkInterpreter(
     modelBuffer: MappedByteBuffer,
@@ -28,6 +29,8 @@ class PoseLandmarkInterpreter(
     private val imageOutput = Array(1) { FloatArray(PoseTensorContract.IMAGE_OUTPUT_SIZE) }
     private val presenceOutput = Array(1) { FloatArray(1) }
     private val worldOutput = Array(1) { FloatArray(PoseTensorContract.WORLD_OUTPUT_SIZE) }
+    private val inferenceInputs = arrayOf<Any>(ByteBuffer.allocate(0))
+    private val inferenceOutputs: MutableMap<Int, Any> = HashMap(3)
 
     private val preprocessor = ImageProcessor.Builder()
         .add(NormalizeOp(0f, 255f))
@@ -55,6 +58,9 @@ class PoseLandmarkInterpreter(
         validateOutputTensorType(outputIndices.image, interpreter.getOutputTensor(outputIndices.image).dataType())
         validateOutputTensorType(outputIndices.presence, interpreter.getOutputTensor(outputIndices.presence).dataType())
         validateOutputTensorType(outputIndices.world, interpreter.getOutputTensor(outputIndices.world).dataType())
+        inferenceOutputs[outputIndices.image] = imageOutput
+        inferenceOutputs[outputIndices.presence] = presenceOutput
+        inferenceOutputs[outputIndices.world] = worldOutput
     }
 
     override fun infer(cropBitmap: Bitmap): PoseResult {
@@ -75,12 +81,8 @@ class PoseLandmarkInterpreter(
         val preprocessMs = elapsedMs(preprocessStartNs)
         val inferenceStartNs = System.nanoTime()
 
-        val outputs = mapOf(
-            outputIndices.image to imageOutput,
-            outputIndices.presence to presenceOutput,
-            outputIndices.world to worldOutput
-        )
-        interpreter.runForMultipleInputsOutputs(arrayOf(processedTensor.buffer), outputs)
+        inferenceInputs[0] = processedTensor.buffer
+        interpreter.runForMultipleInputsOutputs(inferenceInputs, inferenceOutputs)
 
         val inferenceMs = elapsedMs(inferenceStartNs)
         val postprocessStartNs = System.nanoTime()

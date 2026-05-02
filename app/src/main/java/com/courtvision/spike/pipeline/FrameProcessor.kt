@@ -1,13 +1,17 @@
 package com.courtvision.spike.pipeline
 
-import android.os.Build
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import android.os.Build
 import android.util.Log
 import android.os.SystemClock
 import androidx.annotation.VisibleForTesting
 import androidx.camera.core.ImageProxy
 import com.qualcomm.qti.QnnDelegate
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -160,11 +164,24 @@ class FrameProcessor(
         .add(NormalizeOp(0f, 255f))
         .build()
     private val yoloTensorImage = TensorImage(DataType.FLOAT32)
+    // QNN preprocess state is reused across mode switches for the lifetime of FrameProcessor.
+    private val npuInputBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(3 * MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
+            .order(ByteOrder.nativeOrder())
+    private val npuPixelBuffer = IntArray(MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
+    private val npuScaledBitmap: Bitmap =
+        Bitmap.createBitmap(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, Bitmap.Config.ARGB_8888)
+    private val npuCanvas = Canvas(npuScaledBitmap)
+    private val npuScaleRect =
+        RectF(0f, 0f, MODEL_INPUT_SIZE.toFloat(), MODEL_INPUT_SIZE.toFloat())
+    private val npuScalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     private lateinit var outputTensorRaw: Array<Array<FloatArray>>
     private val outputTensorE2E = Array(1) { Array(E2E_MAX_DETS) { FloatArray(E2E_FIELDS) } }
     private lateinit var qnnOutputBoxes: Array<Array<ByteArray>>
     private lateinit var qnnOutputScores: Array<Array<ByteArray>>
+    private val qnnInferenceInputs = arrayOf<Any>(npuInputBuffer)
+    private val qnnInferenceOutputs: MutableMap<Int, Any> = HashMap(2)
     private var outputFormat = ModelOutputFormat.RAW_8400
 
     private var interpreter: InferenceEngine? = null
@@ -505,7 +522,7 @@ class FrameProcessor(
             if (nativeLibraryDir != null) {
                 options.setSkelLibraryDir(nativeLibraryDir)
             }
-            options.setLogLevel(QnnDelegate.Options.LogLevel.LOG_LEVEL_WARN)
+            options.setLogLevel(QnnDelegate.Options.LogLevel.LOG_LEVEL_INFO)
             if (modelCacheDir != null) {
                 options.setCacheDir(modelCacheDir)
                 options.setModelToken(computeModelMd5())
@@ -641,9 +658,10 @@ class FrameProcessor(
             "QNN_NPU: output_1 dtype not INT8"
         }
 
-        // TODO: reuse existing arrays on QNN re-entry if we keep bouncing between modes.
         qnnOutputBoxes = Array(1) { Array(4) { ByteArray(OUTPUT_BOXES) } }
         qnnOutputScores = Array(1) { Array(CUSTOM_CLASS_NAMES.size) { ByteArray(OUTPUT_BOXES) } }
+        qnnInferenceOutputs[0] = qnnOutputBoxes
+        qnnInferenceOutputs[1] = qnnOutputScores
         outputFormat = ModelOutputFormat.QNN_INT8_8400
     }
 
@@ -834,10 +852,8 @@ class FrameProcessor(
             }
             ModelOutputFormat.QNN_INT8_8400 -> {
                 val yoloInferenceStartNs = System.nanoTime()
-                localInterpreter.runForMultipleInputsOutputs(
-                    arrayOf<Any>(inputBuffer),
-                    mutableMapOf(0 to qnnOutputBoxes, 1 to qnnOutputScores)
-                )
+                qnnInferenceInputs[0] = inputBuffer
+                localInterpreter.runForMultipleInputsOutputs(qnnInferenceInputs, qnnInferenceOutputs)
                 yoloInferenceMs = elapsedMs(yoloInferenceStartNs)
 
                 val yoloNmsStartNs = System.nanoTime()
@@ -1036,6 +1052,8 @@ class FrameProcessor(
         qnnOutputScores = Array(1) { index ->
             Array(CUSTOM_CLASS_NAMES.size) { channel -> scores[index][channel].copyOf() }
         }
+        qnnInferenceOutputs[0] = qnnOutputBoxes
+        qnnInferenceOutputs[1] = qnnOutputScores
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -1376,36 +1394,28 @@ class FrameProcessor(
     }
 
     internal fun preprocessNchwInt8Manual(bitmap: Bitmap): ByteBuffer {
-        val scaled = Bitmap.createScaledBitmap(bitmap, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, true)
-        val pixels = IntArray(MODEL_INPUT_SIZE * MODEL_INPUT_SIZE)
-        return try {
-            scaled.getPixels(
-                pixels,
-                0,
-                MODEL_INPUT_SIZE,
-                0,
-                0,
-                MODEL_INPUT_SIZE,
-                MODEL_INPUT_SIZE
-            )
-
-            ByteBuffer.allocateDirect(3 * MODEL_INPUT_SIZE * MODEL_INPUT_SIZE).apply {
-                for (pixel in pixels) {
-                    put(((pixel shr 16 and 0xFF) - 128).toByte())
-                }
-                for (pixel in pixels) {
-                    put(((pixel shr 8 and 0xFF) - 128).toByte())
-                }
-                for (pixel in pixels) {
-                    put(((pixel and 0xFF) - 128).toByte())
-                }
-                rewind()
-            }
-        } finally {
-            if (scaled !== bitmap) {
-                scaled.recycle()
-            }
+        npuCanvas.drawBitmap(bitmap, null, npuScaleRect, npuScalePaint)
+        npuScaledBitmap.getPixels(
+            npuPixelBuffer,
+            0,
+            MODEL_INPUT_SIZE,
+            0,
+            0,
+            MODEL_INPUT_SIZE,
+            MODEL_INPUT_SIZE
+        )
+        npuInputBuffer.clear()
+        for (pixel in npuPixelBuffer) {
+            npuInputBuffer.put(((pixel shr 16 and 0xFF) - 128).toByte())
         }
+        for (pixel in npuPixelBuffer) {
+            npuInputBuffer.put(((pixel shr 8 and 0xFF) - 128).toByte())
+        }
+        for (pixel in npuPixelBuffer) {
+            npuInputBuffer.put(((pixel and 0xFF) - 128).toByte())
+        }
+        npuInputBuffer.rewind()
+        return npuInputBuffer
     }
 
     // TODO: remove unused preprocessing variant - later cleanup (post Day 6.1)
