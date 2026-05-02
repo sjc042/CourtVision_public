@@ -434,10 +434,9 @@ private fun tryCreateQnnDelegate(): QnnDelegate? {
         opts.setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND)
         opts.setHtpUseConvHmx(QnnDelegate.Options.HtpUseConvHmx.HTP_CONV_HMX_ON)
         opts.setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_BURST)
-        // Note: HTP_PRECISION_FP16 controls accumulator precision within the
-        // already-quantized graph; it does NOT make HTP execute FP16 graphs.
-        // The graph itself must be INT8 QDQ (produced in Step 0).
-        opts.setHtpPrecision(QnnDelegate.Options.HtpPrecision.HTP_PRECISION_FP16)
+        // INT8 quantized model: leave HtpPrecision unset so HTP stays on the
+        // quantized path. HTP_PRECISION_FP16 is FP16-model-only and should not
+        // be copied into this QDQ-INT8 path.
         QnnDelegate(opts)
     } catch (error: Throwable) {
         _lastError.value = "QNN delegate init failed: ${error.message ?: "unknown error"}"
@@ -848,20 +847,40 @@ Completed JVM coverage includes:
 
 ### Step 10 — Fail-fast smoke probe (DD-8)
 
-**Status:** 🔲 TODO
+**Status:** ✅ PASS (2026-05-01) — 357/357 nodes on HTP, 0 fallback (0%). Cache restored from binary.
 
 Before running the 10-min soak, run a one-frame inspection to confirm HTP actually owns the YOLO graph.
 
 1. Install APK, launch, switch to NPU mode
-2. Capture logcat:
+2. Capture logcat in stages:
+
+   **Stage 1 — app-level QNN init** (tag `CVRotation`, emitted by `FrameProcessor`):
    ```bash
-   adb logcat -s QnnDelegate:V QNN:V
+   adb logcat -s CVRotation:I
    ```
+   Must see `[QNN_INIT] caps: HTP_QUANT=true` to confirm the delegate was constructed. If absent, QNN init failed before delegation.
+
+   **Stage 2 — native delegate partition summary** (native tag on LiteRT 2.16.1 is `tflite`, not `QnnDelegate`):
+   ```bash
+   adb logcat -s tflite:V
+   ```
+   Actual partition line format (LiteRT 2.16.1 / SM8450):
+   ```
+   INFO: [Qnn Delegate] TfLiteQnnDelegate delegate: <N> nodes delegated out of <N+M> nodes with <P> partitions.
+   ```
+
+   **Stage 3 — broad fallback** if Stage 2 is empty (discovers actual native tag on this device/SDK):
+   ```bash
+   adb logcat | grep -iE "\[QNN_INIT\]|QnnDelegate|litert|HTP"
+   ```
+
 3. Run for ≈ 30 seconds (covers cold compile + first 100 frames)
-4. Parse logcat for delegate partition output. Expected pattern (exact string varies by SDK version):
+4. Parse logcat for delegate partition output. Actual result on SM8450 / LiteRT 2.16.1:
    ```
-   QnnDelegate: <N> nodes delegated to HTP, <M> nodes on fallback (CPU/GPU)
+   TfLiteQnnDelegate delegate: 357 nodes delegated out of 357 nodes with 1 partitions.
+   Replacing 357 out of 357 node(s) with delegate (TfLiteQnnDelegate) node, yielding 1 partitions for the whole graph.
    ```
+   Note: cache hit triggers RESTORE MODE — binary cache at `/cache/qnn_binary_*.bin` skips recompile on subsequent launches.
 
 **Pass:** `M / (N + M) < 0.05` (≥ 95% of nodes on HTP).
 **Borderline (0.05–0.20):** acceptable for Day 6.1 but capture the fallback op list for a follow-up; common offenders are NMS-adjacent ops or unsupported activations, addressable by re-exporting with op-substitution flags.
@@ -876,32 +895,44 @@ If failed, re-export Step 0 with explicit verification rather than running the s
 
 ### Step 11 — 10-min soak benchmark (user-run)
 
-**Status:** 🔲 TODO
+**Status:** ✅ COMPLETE (2026-05-02) — `benchmarks/phase0/phase0-perframe-20260502-001250-day6-1-step11-10min-soak.csv`
 
-**Pre-conditions:** Steps 0–10 complete, Step 10 smoke probe PASS, S22+ pre-cooled (≥ 30 min rest).
+**Device:** SM-S906U1 (Galaxy S22, SM8450 / Snapdragon 8 Gen 1)  
+**Mode:** QNN_NPU · **Frames:** 8192 · **Pose skipped:** 830 (10.1%)
 
-1. Launch app → select **NPU** mode
-2. **First NPU switch:** expect 1–3 s stall (Hexagon graph compilation, one-time). Subsequent launches are fast (cache hit).
-3. Verify overlay renders (detection boxes + pose landmarks) — confirms QNN mode did not silently degrade to CPU
-4. Verify `lastError` display is null or informational
-5. Run 10 minutes portrait, then pull:
-   ```
-   adb pull /sdcard/Android/data/com.courtvision.spike/files/benchmarks/phase0/combined_pipeline/
-   ```
-6. Save to `benchmarks/phase0/combined_pipeline/run_YYYYMMDD_HHMMSS_qnn_npu/`
+#### Results
 
-**Gate analysis:**
-```python
-import pandas as pd
-df = pd.read_csv("phase0-perframe-YYYYMMDD-HHMMSS.csv")
-qnn = df[df["gpu_mode"] == "QNN_NPU"]
-print("YOLO p50:", qnn["yolo_inference_ms"].quantile(0.50))
-print("YOLO p95:", qnn["yolo_inference_ms"].quantile(0.95))
-print("frame_total p95:", qnn["frame_total_ms"].quantile(0.95))
-print("FPS median:", qnn["fps_1s_window"].median())
-print("Thermal MODERATE onset s:", (qnn[qnn["thermal_status"]=="MODERATE"]["timestampMs"].min()
-      - qnn["timestampMs"].min()) / 1000)
-```
+| Metric | p50 | p95 | p99 |
+|---|---|---|---|
+| `yolo_preprocess_ms` (CPU, steady) | **38.90 ms** | 48.38 ms | 57.70 ms |
+| `yolo_inference_ms` (NPU, steady) | **3.46 ms** | 3.69 ms | 4.50 ms |
+| `pose_inference_ms` (GPU, non-skipped) | 7.76 ms | 11.20 ms | 16.64 ms |
+| `frame_total_ms` (steady) | 64.8 ms | 81.4 ms | 98.0 ms |
+| `fps_1s_window` (non-zero) | **14.0 fps** | — | — |
+
+**Note:** `yolo_preprocess_ms` (38.9 ms) is the dominant pipeline cost — over 10× the NPU inference time (3.5 ms). CPU preprocess is the primary optimization target going forward.
+
+**Cold-start frame 1:** 408.9 ms (incl. init overhead); frame 2: 80.4 ms; steady from frame ~5.
+
+#### Thermal profile (steady, frames 100+)
+
+| Status | Frames | % | frame_total p50 |
+|---|---|---|---|
+| NONE | 1076 | 13.3% | 49.6 ms |
+| LIGHT | 871 | 10.8% | 53.0 ms |
+| MODERATE | 560 | 6.9% | 61.2 ms |
+| **SEVERE** | **3897** | **48.2%** | **67.6 ms** |
+| **CRITICAL** | **1688** | **20.9%** | **69.4 ms** |
+
+**YOLO/HTP thermal resilience:** NONE→CRITICAL drift is 3.26→3.52 ms (+8%) — HTP is thermally isolated.  
+**Pipeline thermal degradation:** first-60s median 49.6 ms → last-60s median 69.1 ms (+39%). Bottleneck under load is CPU preprocess + GPU pose, not the NPU.
+
+#### Assessment
+
+The SM8450 (Snapdragon 8 Gen 1) is a known thermal outlier — SEVERE onset within ~90 s of continuous use is device-characteristic, not a pipeline regression. The NPU inference budget itself is stable. Follow-up candidates:
+- GPU/shader-based preprocess to eliminate the 38.9 ms CPU preprocess cost
+- Pose model on NPU (currently GPU) to reduce GPU thermal contribution
+- Throttle frame submission rate when `thermal_status >= SEVERE` to stay at ~15 fps without burning budget
 
 ---
 
