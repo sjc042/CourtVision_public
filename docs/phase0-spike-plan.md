@@ -84,7 +84,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 - **PRD target:** Pose inference < 50ms per frame
 - **Output:** Pose latency log + EGL context verification result recorded in CONTEXT.md
 
-### Day 6 — Sequential GPU Combined Pipeline
+### Day 6 — Sequential GPU Combined Pipeline ✅
 
 > Architecture: [ADR-005 — Sequential GPU Inference Pipeline](decisions/005-sequential-gpu-inference-pipeline.md)
 
@@ -100,6 +100,19 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 
 > **Note:** The original `frame-scheduling-spec.md` (Worker A / Worker B two-channel design) is
 > superseded by ADR-005. See `frame-scheduling-spec.md` header for details.
+
+> See [docs/plans/day6-combined-pipeline.md](plans/day6-combined-pipeline.md) — **COMPLETED 2026-04-22**
+>
+> S22+ 10-min soak, `gpu_mode=GPU`: `frame_total_ms` p95=129 ms (Day 8 gate FAIL); FPS median=8 fps (FAIL). Bottleneck: YOLO inference p50=53 ms + SM8450 thermal ceiling. Pose inference healthy (p95=15 ms). → Prompted Day 6.1 NPU work.
+
+### Day 6.1 — QNN NPU Pipeline ✅
+
+> Plan: [docs/plans/day6-1-qnn-npu-pipeline.md](plans/day6-1-qnn-npu-pipeline.md) — **COMPLETED 2026-05-02**
+
+- INT8 YOLO model (`spike_qai_yolo11n_640_5-class_04-28-2026_int8.tflite`, mAP50=0.9143) deployed via QNN TFLite delegate (Hexagon HTP backend)
+- ADR-007: split-output decoder required for INT8 exports — combined `(1,9,8400)` head collapses class scores; use `(1,4,8400)` + `(1,5,8400)` split heads
+- S22+ 10-min soak, `gpu_mode=QNN_NPU`: YOLO inference p50=**3.46 ms** / p95=3.69 ms; `frame_total_ms` p95=**81.4 ms** (Day 8 gate PASS); FPS median=14 fps (FAIL)
+- CPU preprocess at 38.9 ms p50 is the dominant pipeline cost — primary optimization target for next perf cycle
 
 ### Day 7 — Shot Detection Logic (State Machine)
 
@@ -122,7 +135,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 
 **If green** → proceed to full architecture build (Phase 2)
 
-**If red** → apply Config D fallback (pose on CPU), revisit model quantization or input resolution (416 or 320), or descope pose from MVP. NPU acceleration via QNN delegate is a Phase 2 optimization (see ADR-005 Deferred section) — not available during the spike.
+**If red** → apply Config D fallback (pose on CPU), revisit model quantization or input resolution (416 or 320), or descope pose from MVP. NPU acceleration via QNN delegate (Config B) was validated in Day 6.1 — YOLO inference p50=3.46 ms on HTP. Remaining FPS gap (14 fps vs 20 fps target) is CPU preprocess-bound, not model-bound.
 
 ---
 

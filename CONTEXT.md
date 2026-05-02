@@ -1,7 +1,7 @@
 ﻿# CourtVision — AI Session Context
 
 > Paste this file in full at the start of every Codex or Gemini session.
-> Last updated: April 2026 — Phase 0 (Technical Spike, Days 1–5 complete)
+> Last updated: May 2026 — Phase 0 (Technical Spike, Days 1–6.1 complete)
 
 ---
 
@@ -46,7 +46,7 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 
 > Full spike plan: [docs/phase0-spike-plan.md](docs/phase0-spike-plan.md)
 
-**Progress:** Days 1–5 complete. Day 5 gates passed on S22+ (SM-S906U1): EGL/thread PASS, visual plausibility PASS, pose p95 10.774ms (PASS_STRONG). ADR-005 (sequential GPU pipeline) accepted 2026-04-07; ADR-006 (pose gating + person selection modes) accepted 2026-04-15.
+**Progress:** Days 1–6.1 complete. Day 5 gates passed on S22+ (SM-S906U1): EGL/thread PASS, visual plausibility PASS, pose p95 10.774ms (PASS_STRONG). ADR-005 (sequential GPU pipeline) accepted 2026-04-07; ADR-006 (pose gating + person selection modes) accepted 2026-04-15. Day 6.1 QNN NPU pipeline validated 2026-05-02: 357/357 nodes on HTP (0% fallback), YOLO inference p50=3.46 ms / p95=3.69 ms, frame_total p95=81.4 ms, FPS median=14 fps. CPU preprocess (38.9 ms p50) is the dominant pipeline cost. ADR-005 Config B validated; ADR-007 (split-output decoder) active.
 
 ### Day 8 Gate Criteria (all must pass)
 - [ ] Ball detection latency < 100ms (p95 < 140ms)
@@ -69,6 +69,16 @@ CameraX → YOLO (5-class) → Kalman tracker → shot state machine → metrics
 ### Day 6 Step 2 Verification Note (2026-04-16, updated 2026-04-22)
 - `PoseLandmarkInterpreter.infer()` is on the no-alloc code path (`TensorImage` + `ImageProcessor(NormalizeOp)`), and now requires 256x256 input.
 - Android Studio Memory Profiler capture dropped from Day 6 sign-off (2026-04-22). Indirect verification via the Step 7 soak: `pose_inference_ms` p50 / p99 = 11.17 / 19.44 ms (spread ~8 ms) across 5089 non-skipped pose frames — inconsistent with per-frame ~1 MB allocations that would trigger GC-pause outliers in the 40–80 ms range. Direct profiler capture deferred to Phase 2 if a pose-side allocation regression is ever suspected.
+
+### Day 6.1 QNN NPU Benchmark Results (2026-05-02)
+
+S22+ 10-min soak, `gpu_mode=QNN_NPU`, 8192 frames. HTP delegation: 357/357 nodes (0% fallback).
+- `yolo_inference_ms` (NPU): p50=**3.46 ms**, p95=3.69 ms — thermally stable (+8% NONE→CRITICAL)
+- `yolo_preprocess_ms` (CPU): p50=**38.9 ms** — dominant bottleneck, 10× inference cost
+- `frame_total_ms`: p50=64.8 ms, p95=**81.4 ms** | FPS median=**14 fps**
+- Day 8 gates (QNN_NPU): `frame_total p95` ≤100 ms → **PASS**; FPS ≥20 → **FAIL** (preprocess offload required)
+
+Full analysis: [docs/plans/day6-1-qnn-npu-pipeline.md](docs/plans/day6-1-qnn-npu-pipeline.md) Step 11.
 
 ### Day 6 Step 7 Benchmark Results (2026-04-22; §7 re-scored 2026-04-26)
 

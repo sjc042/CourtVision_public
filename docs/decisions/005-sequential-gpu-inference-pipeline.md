@@ -287,11 +287,18 @@ GC pressure, move to bitmap pooling in Phase 2.
   | Config | YOLO delegate | Pose delegate | New dependency | Status |
   |--------|--------------|---------------|----------------|--------|
   | A (Phase 0, this ADR) | GPU | GPU | None | ✅ Active |
-  | B | QNN → NPU | GPU | QAI Hub INT8 YOLO + QNN AAR | 🔄 **In progress (Day 6.1)** |
-  | C | GPU | QNN → NPU | QAI Hub INT8 pose + QNN AAR | Deferred — pose p95=15ms, not bottleneck |
+  | B | QNN → NPU | GPU | QAI Hub INT8 YOLO + QNN AAR | ✅ **Validated (2026-05-02)** |
+  | C | GPU | QNN → NPU | QAI Hub INT8 pose + QNN AAR | Deferred — pose p95=15ms, not bottleneck alone |
   | D (fallback) | GPU | CPU (4 threads) | None | Fallback if GPU fails latency gate |
+  | **E (target optimum)** | **QNN → NPU** | **QNN → NPU** | QAI Hub INT8 pose (YOLO AAR already present) | Deferred — requires INT8 pose model export |
 
   **Config B update (2026-04-28):** INT8 YOLO model validated — `spike_qai_yolo11n_640_5-class_04-28-2026_int8.tflite`, mAP50=0.9143. Plan: [`docs/plans/day6-1-qnn-npu-pipeline.md`](../plans/day6-1-qnn-npu-pipeline.md). Output contract: [ADR-007](007-tflite-npu-split-output-contract.md) — INT8 exports require split output heads `(1,4,8400)` + `(1,5,8400)` (combined `(1,9,8400)` collapses class scores to zero under per-tensor INT8 quantization).
+
+  **Config B validated (2026-05-02):** 10-min soak on SM-S906U1 (SM8450). HTP delegation: 357/357 nodes, 0 fallback (Step 10 PASS). YOLO inference p50=3.46 ms / p95=3.69 ms (thermally stable: +8% NONE→CRITICAL). Frame total p95=81.4 ms (Day 8 gate PASS); FPS median=14 fps (Day 8 gate FAIL — CPU preprocess at 38.9 ms is the bottleneck, not NPU).
+
+  **INT8-only precision decision:** `HtpPrecision` must be left **unset** (not `HTP_PRECISION_FP16`) for QDQ-INT8 models. Setting `HTP_PRECISION_FP16` forces FP16 compute on the HTP backend, which mismatches the QDQ-INT8 graph and causes "Failed to apply delegate" during `Interpreter()` construction. The INT8 quantized path is selected automatically when `HtpPrecision` is absent and the model contains quantize/dequantize nodes.
+
+  **Config E rationale (target optimum):** Config B soak showed the 40% frame-time degradation over 10 min is driven by SM8450 thermal ceiling on CPU preprocess (38.9 ms p50) and GPU pose inference. Moving pose to HTP removes the GPU from the inference path entirely — freeing GPU memory bandwidth and eliminating its thermal contribution. HTP inference is thermally resilient (Config B demonstrated +8% NONE→CRITICAL drift on YOLO); the same resilience is expected for pose. CPU preprocess remains the sole inference-side bottleneck in Config E, making it the correct next target. Prerequisite: export `pose_landmarks_detector.tflite` INT8 via QAI Hub and validate against pose accuracy baseline (WorldLandmarks MAE vs FP16 GPU reference). The QNN AAR and `InferenceMode.QNN_NPU` delegate path are already present from Config B — no new infrastructure required.
 
 - **ARCore depth intrinsics**: Replace monocular Z estimate with camera-calibrated back-projection for accurate wrist-to-camera distance. Required for full perspective correction of the shot arc parabola fit.
 - **Physics-informed post-processing**: Bone-length-constrained Kalman smoothing (94.3% variance reduction vs. raw BlazePose world coordinates) for more stable joint angle time series.
