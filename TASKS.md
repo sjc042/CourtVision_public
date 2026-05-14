@@ -90,7 +90,7 @@ Branching rule:
 
 ## Per-Plan Queue
 
-### Day 6.2 — Trivial no-dep wins
+### Day 6.2 — Trivial no-dep wins ✅
 
 - Branch: `perf/day6-2-trivial-perf-wins`
 - Plan: `docs/plans/day6-2-trivial-perf-wins.md`
@@ -99,7 +99,7 @@ Branching rule:
 - Expected outcome: cleaner GPU hot path, reduced alloc pressure, and improved sustained GPU baseline before QNN testing
 - Validation gate summary: GPU path still works; YOLO p50 stays near the Day 6 baseline; thermal trajectory is at least not worse than Day 6
 
-### Day 6.1 — QNN NPU pipeline
+### Day 6.1 — QNN NPU pipeline ✅
 
 - Branch: `perf/day6-1-qnn-npu-pipeline`
 - Plan: `docs/plans/day6-1-qnn-npu-pipeline.md`

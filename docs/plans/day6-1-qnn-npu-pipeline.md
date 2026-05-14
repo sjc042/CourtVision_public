@@ -1,12 +1,10 @@
 ﻿# Plan: Day 6.1 — QNN NPU Pipeline (Model Conversion → Quantization → Deploy)
 
-**Status:** 🔄 IN PROGRESS — Step 0 ✅ complete; Steps 1–8 ✅ complete; Step 9 🟡 partial; first pause gate ✅ resolved; byte sign-extension gate ✅ resolved; live `FrameProcessor` QNN path wired; smoke / soak / final-doc steps pending
-**Version:** v2 (supersedes v1; flips FP16-first → INT8-only path)
+**Status:** ✅ COMPLETE (2026-05-02) — Steps 0–12 done. §5 smoke ✅ 357/357 nodes on HTP (0% fallback); §6 YOLO p50=3.46 ms ✅; §7 `frame_total` p95=81.4 ms ✅; §8 FPS 14 fps ❌ (CPU preprocess bottleneck at 38.9 ms — preprocess offload required). Docs updated: CONTEXT.md, ADR-005 Config B validated + Config E added, spike plan.
+**Version:** v9 (see Changelog for full history)
 **Created:** 2026-04-27
 **Bridges:** Day 6 (sequential GPU combined pipeline, §3/§6 FAIL) → Day 7 (shot FSM)
 **Gap addressed:** Gap 1 — QNN NPU delegate for YOLO inference on Hexagon 780 HTP (SM8450, Samsung S22+)
-
-**Status note (2026-04-29):** The header status is authoritative. Several internal step markers below were reconciled after the runtime slices landed, and some older inline `TODO` markers were stale.
 
 ---
 
@@ -847,7 +845,7 @@ Completed JVM coverage includes:
 
 ### Step 10 — Fail-fast smoke probe (DD-8)
 
-**Status:** ✅ PASS (2026-05-01) — 357/357 nodes on HTP, 0 fallback (0%). Cache restored from binary.
+**Status:** ✅ PASS (2026-05-01, day before 10-min soak) — 357/357 nodes on HTP, 0 fallback (0%). Logcat confirmed `caching in RESTORE MODE` and `QnnContext_createFromBinary` (graph composition skipped); first-frame cold-start still ~409 ms (HTP context init overhead, not graph compilation — §10 cache warmup gate result).
 
 Before running the 10-min soak, run a one-frame inspection to confirm HTP actually owns the YOLO graph.
 
@@ -880,7 +878,13 @@ Before running the 10-min soak, run a one-frame inspection to confirm HTP actual
    TfLiteQnnDelegate delegate: 357 nodes delegated out of 357 nodes with 1 partitions.
    Replacing 357 out of 357 node(s) with delegate (TfLiteQnnDelegate) node, yielding 1 partitions for the whole graph.
    ```
-   Note: cache hit triggers RESTORE MODE — binary cache at `/cache/qnn_binary_*.bin` skips recompile on subsequent launches.
+   RESTORE MODE confirmed (2026-05-02, `adb logcat -s tflite:V`):
+   ```
+   INFO: [Qnn Delegate] Caching: cache_filename of …/cache/qnn_binary_12533001225297295345.bin of 3354624 bytes is available, caching in RESTORE MODE.
+   INFO: [Qnn] QnnDsp <I> QnnContext_createFromBinary started. backend = 0x1, device = 0x1
+   INFO: [Qnn] QnnDsp <I> QnnContext_createFromBinary done successfully. context = 0x1
+   ```
+   `QnnContext_createFromBinary` completes in ~183 ms (13.762 → 13.945). Full QNN delegate init (probe → first execution ready) takes ~1 s. Cold start to first frame remains >400 ms because GPU/OpenCL init for the pose model takes an additional ~7 s on a fresh launch (see §10 gate).
 
 **Pass:** `M / (N + M) < 0.05` (≥ 95% of nodes on HTP).
 **Borderline (0.05–0.20):** acceptable for Day 6.1 but capture the fallback op list for a follow-up; common offenders are NMS-adjacent ops or unsupported activations, addressable by re-exporting with op-substitution flags.
@@ -893,7 +897,7 @@ If failed, re-export Step 0 with explicit verification rather than running the s
 
 ---
 
-### Step 11 — 10-min soak benchmark (user-run)
+### Step 11 — 10-min soak benchmark
 
 **Status:** ✅ COMPLETE (2026-05-02) — `benchmarks/phase0/phase0-perframe-20260502-001250-day6-1-step11-10min-soak.csv`
 
@@ -936,13 +940,13 @@ The SM8450 (Snapdragon 8 Gen 1) is a known thermal outlier — SEVERE onset with
 
 ---
 
-### Step 12 — `CONTEXT.md` + `ADR-005` update
+### Step 12 — `CONTEXT.md` + `ADR-005` + spike plan update
 
-**Status:** 🔲 TODO
+**Status:** ✅ COMPLETE (2026-05-02)
 
-After benchmark:
-- Update `CONTEXT.md` "Progress" line; add "Day 6.1 Benchmark Results" section
-- Update `ADR-005` §Deferred: mark Config B "In progress (Day 6.1)"; record **INT8-only** decision and the FP16-on-HTP misconception flagged-and-corrected
+- `CONTEXT.md`: updated header to "Days 1–6.1 complete"; added Day 6.1 benchmark results section (YOLO NPU p50/p95, frame_total p95, FPS, Day 8 gate verdicts); updated Progress line.
+- `ADR-005` §Deferred: Config B promoted to "Validated (2026-05-02)" with soak numbers; INT8-only `HtpPrecision` decision documented (must be unset — FP16 flag mismatches QDQ-INT8 graph); **Config E added** (both YOLO + pose on QNN→NPU, target optimum) with rationale.
+- `docs/phase0-spike-plan.md`: Day 6 GPU pipeline marked complete with results; Day 6.1 NPU section added; outdated "NPU is Phase 2" note in Day 8 corrected.
 
 ---
 
@@ -953,16 +957,16 @@ After benchmark:
 | §0a INT8 export | ✅ `spike_qai_yolo11n_640_5-class_04-28-2026_int8.tflite` (Route B) | — |
 | §0b Graph dtype | ✅ NCHW int8 input; split output heads (1,4,8400)+(1,5,8400) with separate quant params | — |
 | §0c Accuracy | ⚠️ mAP50=0.9143 BORDERLINE/ACCEPTED (gate ≥0.92; PTQ ceiling reached on Route B) | QAT if 5-class accuracy becomes a product concern post-Day 6.1 |
-| §1 Build | `./gradlew :app:assembleDebug` succeeds | Fix NDK/dep issue; add `ndkVersion` if needed |
-| §2 Unit tests | All green incl. new INT8 model-load test | Fix before APK install |
-| §3 QNN probe on S22+ | Overlay shows `QNN: QNN_SUPPORTED HTP_QUANT=true` | `adb logcat \| grep QNN`; verify `libcdsprpc.so` declared |
-| §4 NPU mode switch | No fallback error; `gpu_mode=QNN_NPU` throughout CSV | GPU fallback still functional; capture QNN logcat tag |
-| §5 Smoke probe (DD-8) | ≥ 95% of YOLO nodes on HTP | Re-do Step 0 — graph likely contains float fallback ops |
-| §6 YOLO p50 | ≤ 10 ms (revised from v1's 20 ms — INT8 on HTP target) | 10–25 ms → check thermal throttle / op partial fallback; > 25 ms → investigate |
-| §7 Combined p95 | `frame_total_ms` p95 ≤ 100 ms | Check if pose is new bottleneck (`pose_inference_ms` p95) |
-| §8 FPS sustained | ≥ 20 fps median over 10 min | Note thermal MODERATE onset time vs Day 6 baseline t=68 s — should be later given lower YOLO load |
-| §9 GPU mode regression | GPU p50 ≈ 53 ms ± 5 ms after switching back | Day 6.1 makes no changes to the GPU branch — should be trivially true |
-| §10 Cache warmup | 2nd cold start NPU switch < 500 ms | Verify `modelCacheDir` non-null; check logcat for QNN cache hit |
+| §1 Build | ✅ `./gradlew :app:assembleDebug` succeeds | Fix NDK/dep issue; add `ndkVersion` if needed |
+| §2 Unit tests | ✅ All green incl. new INT8 model-load test | Fix before APK install |
+| §3 QNN probe on S22+ | ✅ Overlay shows `QNN: QNN_SUPPORTED HTP_QUANT=true` | `adb logcat \| grep QNN`; verify `libcdsprpc.so` declared |
+| §4 NPU mode switch | ✅ No fallback error; `gpu_mode=QNN_NPU` throughout CSV | GPU fallback still functional; capture QNN logcat tag |
+| §5 Smoke probe (DD-8) | ✅ ≥ 95% of YOLO nodes on HTP | Re-do Step 0 — graph likely contains float fallback ops |
+| §6 YOLO p50 | ✅ ≤ 10 ms (revised from v1's 20 ms — INT8 on HTP target) | 10–25 ms → check thermal throttle / op partial fallback; > 25 ms → investigate |
+| §7 Combined p95 | ✅ `frame_total_ms` p95 ≤ 100 ms | Check if pose is new bottleneck (`pose_inference_ms` p95) |
+| §8 FPS sustained | ≥ 20 fps median over 10 min | ❌ FAIL — 14 fps median; CPU preprocess bottleneck (38.9 ms p50). Preprocess offload required. |
+| §9 GPU mode regression | GPU p50 ≈ 53 ms ± 5 ms after switching back | ✅ Trivially — Day 6.1 makes no changes to the GPU branch |
+| §10 Cache warmup | 2nd cold start NPU switch < 500 ms | ⚠️ RESTORE MODE confirmed (2026-05-02 logcat); `QnnContext_createFromBinary` = 183 ms, but full cold start >400 ms (HTP context init ~1 s; GPU/OpenCL pose init adds ~7 s on a fresh launch). First-frame from soak CSV = 408.9 ms. Gate <500 ms not cleanly met. |
 
 **Note on §6 target revision:** v1 set 20 ms because that was the FP16-on-HTP expectation (which doesn't exist as a real path). With INT8 on HTP the published Qualcomm benchmarks for YOLO11n show 1–5 ms on SM8450-class hardware, so 10 ms is conservative and leaves headroom for app-side overhead.
 
@@ -970,7 +974,7 @@ After benchmark:
 
 ## Deferred Items
 
-- **QAI Hub w8a8 production cut (Route B)** — only invoked if Route A accuracy gate fails; otherwise deferred to production hardening
+- **QAI Hub w8a8 production cut (Route B)** — was the primary path used in Day 6.1 (Route A failed due to zero-mAP on combined `(1,9,8400)` output; see Step 0a/DD-10). A higher-quality re-export with QAT remains deferred to production hardening if the 2.6 pp mAP50 gap becomes a product concern.
 - **QNN for pose (Config C)** — pose p95 = 15 ms; not a bottleneck; Phase 2
 - **Other chipsets** — GPU fallback cascade handles non-Qualcomm devices automatically
 - **MediaTek Dimensity NPU path** — separate INT8 TFLite + Neuron delegate; out of scope
@@ -1061,7 +1065,5 @@ When `ModifyGraphWithDelegate()` fails with the generic "Restored original execu
 **v4 (2026-04-29)** — Data path gaps filled based on actual `FrameProcessor.kt` code review. Added Step 5e (`validateQnnTensorContract()` — separate validator for INT8/NCHW/2-output contract; existing validator unchanged). Expanded Step 5d: dual preprocessing strategies (MANUAL_NCHW_INT8 / TRANSPOSE_QUANT) with `NPU_PREPROCESS_MODE` constant for benchmarking; on-device `NpuPreprocessingLatencyTest` (Step 5d-bench, same pattern as `PreprocessingLatencyTest`) with PAUSE gate before hardcoding; corrected box-coord normalization (/640, pixel-space output); corrected scores are post-sigmoid (no sigmoid); mode-specific NMS constants (NPU conf=0.10/iou=0.35, GPU unchanged 0.40/0.50); conditional NPU_MAX_DET=20 cap; `runForMultipleInputsOutputs` with output map writing directly into pre-alloc buffers (replaces `run(input,null)`) with PAUSE/confirm gate; sign-extension confirm note + PAUSE gate on dequant formula. Added `ModelOutputFormat.QNN_INT8_8400` to Step 3c. Added pre-allocated INT8 ByteArrays to Step 5a. Both preprocessing functions kept after hardcoding; unused marked for later cleanup.
 
 **v3 (2026-04-28)** — Step 0 complete via Route B (QAI Hub). Recorded actual tensor profile: NCHW int8 input, split output heads `(1,4,8400)` boxes + `(1,5,8400)` scores. mAP50=0.9143 BORDERLINE/ACCEPTED. Added DD-10 (split-output requirement + zero-mAP root cause). Added Step 5d (two-tensor decoder, dequant formulas, NMS params from run _14). Updated DD-9 and Step 7 with confirmed asset filename. Route A/B steps rewritten to reflect actual execution. ADR-007 created for the output contract.
-
-**v2 (2026-04-27)** — Flipped FP16-first → INT8-only path. Step 0 promoted to blocking. Added DD-8 fail-fast smoke probe, DD-9 mode-aware asset routing. Tightened §6 YOLO p50 target from 20 ms → 10 ms based on published HTP w8a8 benchmarks. Added test cases guarding against the FP16-HTP misconception. Probe gate now keys on `htpQuantizedSupported`, not `htpFp16Supported`.
 
 **v1 (2026-04-27, superseded)** — Initial plan with FP16 fast path. Conflicted with QNN HTP backend constraints documented in `Claude_nnapi_qnn_report` §7.1 and Qualcomm published benchmark tables. See "Why this plan changed" at top.
