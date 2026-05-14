@@ -13,7 +13,6 @@ import com.qualcomm.qti.QnnDelegate
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
-import java.security.MessageDigest
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -42,7 +41,6 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.TensorFlowLite
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
-import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
@@ -53,6 +51,13 @@ enum class ModelOutputFormat { RAW_8400, END_TO_END_300, QNN_INT8_8400 }
 internal data class TensorContract(
     val shape: IntArray,
     val dataType: DataType
+)
+
+internal data class TfLiteInterpreterOptionsConfig(
+    val numThreads: Int,
+    val allowBufferHandleOutput: Boolean,
+    val useXnnpack: Boolean?,
+    val useNnapi: Boolean?
 )
 
 internal interface InferenceEngine {
@@ -102,12 +107,18 @@ class FrameProcessor(
     private val scope: CoroutineScope,
     private val modelBufferProvider: ((InferenceMode) -> MappedByteBuffer)? = null,
     private val poseModelBufferProvider: (() -> MappedByteBuffer)? = null,
-    private val poseInterpreterFactory: (MappedByteBuffer, Boolean) -> PoseInferenceEngine =
-        { modelBuffer, useGpu -> PoseLandmarkInterpreter(modelBuffer, useGpu = useGpu) },
+    private val poseInterpreterFactory: (MappedByteBuffer, Boolean, String?) -> PoseInferenceEngine =
+        { modelBuffer, useGpu, cacheDir ->
+            PoseLandmarkInterpreter(
+                modelBuffer = modelBuffer,
+                useGpu = useGpu,
+                modelCacheDir = cacheDir
+            )
+        },
     private val consumerDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
     private val nativeLibraryDir: String? = null,
     private val modelCacheDir: String? = null,
-    private val gpuDelegateProvider: (() -> GpuDelegate?)? = null,
+    private val gpuDelegateProvider: ((SustainedSpeedGpuDelegateConfig) -> GpuDelegate?)? = null,
     private val qnnDelegateProvider: (() -> QnnDelegate?)? = null,
     private val thermalStatusProvider: () -> String = { "UNKNOWN" },
     private val perFrameLogger: PerFramePerfLogger? = null,
@@ -186,11 +197,12 @@ class FrameProcessor(
 
     private var interpreter: InferenceEngine? = null
     private var gpuDelegate: GpuDelegate? = null
-    private var nnApiDelegate: NnApiDelegate? = null
     private var qnnDelegate: QnnDelegate? = null
     private var qnnDelegateCloseActionForTest: (() -> Unit)? = null
     private var apiLevelOverrideForTest: Int? = null
     private var poseInterpreter: PoseInferenceEngine? = null
+    private val lastInterpreterOptionsConfig =
+        AtomicReference<TfLiteInterpreterOptionsConfig?>(null)
 
     private val frameChannel = Channel<FrameTask>(
         capacity = 1,
@@ -355,7 +367,7 @@ class FrameProcessor(
         val poseBuffer = poseModelBufferProvider?.invoke() ?: return
         val useGpu = currentMode.get() != InferenceMode.CPU
         try {
-            poseInterpreter = poseInterpreterFactory(poseBuffer, useGpu)
+            poseInterpreter = poseInterpreterFactory(poseBuffer, useGpu, modelCacheDir)
         } catch (error: Throwable) {
             _lastError.value =
                 "Pose interpreter init failed: ${error.message ?: "unknown error"}"
@@ -412,6 +424,14 @@ class FrameProcessor(
     }
 
     private fun switchInterpreter(mode: InferenceMode): Boolean {
+        if (mode == InferenceMode.NNAPI) {
+            val warning = "NNAPI mode is deprecated; using GPU delegate instead"
+            _lastError.value = warning
+            val switched = switchInterpreter(InferenceMode.GPU)
+            _lastError.value = warning
+            return switched
+        }
+
         closeInterpreterResources()
         closePoseResources()
         resetTrackingState()
@@ -425,31 +445,21 @@ class FrameProcessor(
 
         logTfLiteRuntimeInfo(mode)
 
-        val options = Interpreter.Options().apply {
-            setNumThreads(4)
-            setAllowBufferHandleOutput(true)
-        }
+        val mappedModelToken = computeModelMd5(mappedModel)
+        val optionsConfig = interpreterOptionsConfigForMode(mode)
+        lastInterpreterOptionsConfig.set(optionsConfig)
+        val options = Interpreter.Options().applyInterpreterOptionsConfig(optionsConfig)
 
         var localGpuDelegate: GpuDelegate? = null
-        var localNnApiDelegate: NnApiDelegate? = null
         var localQnnDelegate: QnnDelegate? = null
 
         when (mode) {
             InferenceMode.GPU -> {
-                localGpuDelegate = createGpuDelegate()
+                localGpuDelegate = createGpuDelegate(mappedModelToken)
                 if (localGpuDelegate == null) {
                     return false
                 }
                 options.addDelegate(localGpuDelegate)
-            }
-            InferenceMode.NNAPI -> {
-                localNnApiDelegate = try {
-                    NnApiDelegate().also { options.addDelegate(it) }
-                } catch (error: Throwable) {
-                    _lastError.value =
-                        "NNAPI delegate init failed: ${error.message ?: "unknown error"}"
-                    return false
-                }
             }
             InferenceMode.QNN_NPU -> {
                 if (currentApiLevel() < Build.VERSION_CODES.S) {
@@ -460,7 +470,7 @@ class FrameProcessor(
                     return switched
                 }
 
-                localQnnDelegate = createQnnDelegate()
+                localQnnDelegate = createQnnDelegate(mappedModelToken)
                 if (localQnnDelegate == null) {
                     val qnnFailure = _lastError.value ?: "QNN delegate init failed"
                     val switched = switchInterpreter(InferenceMode.GPU)
@@ -469,7 +479,7 @@ class FrameProcessor(
                 }
                 options.addDelegate(localQnnDelegate)
 
-                val gpuSubDelegate = createGpuDelegate()
+                val gpuSubDelegate = createGpuDelegate(mappedModelToken)
                 if (gpuSubDelegate != null) {
                     Log.i(TAG, "[QNN_INIT] GPU sub-delegate added")
                     localGpuDelegate = gpuSubDelegate
@@ -481,6 +491,7 @@ class FrameProcessor(
             InferenceMode.CPU -> {
                 // No delegate for CPU mode.
             }
+            InferenceMode.NNAPI -> error("NNAPI is handled as a GPU alias before delegate creation")
         }
 
         if (mode == InferenceMode.QNN_NPU) {
@@ -488,7 +499,7 @@ class FrameProcessor(
                 TAG,
                 "[QNN_INIT] calling Interpreter() — QNN=${localQnnDelegate != null} " +
                     "GPU_sub=${localGpuDelegate != null} allowBufferHandle=true " +
-                    "modelBytes=${mappedModel.capacity()} md5=${computeModelMd5().take(12)}"
+                    "modelBytes=${mappedModel.capacity()} md5=${mappedModelToken.take(12)}"
             )
         }
 
@@ -501,7 +512,6 @@ class FrameProcessor(
             }
             interpreter = localInterpreter
             gpuDelegate = localGpuDelegate
-            nnApiDelegate = localNnApiDelegate
             qnnDelegate = localQnnDelegate
             currentMode.set(mode)
             _lastError.value = null
@@ -509,14 +519,13 @@ class FrameProcessor(
         } catch (error: Throwable) {
             Log.e(TAG, "[QNN_INIT] Interpreter() FAILED mode=$mode: ${error::class.simpleName}: ${error.message}", error)
             localGpuDelegate?.close()
-            localNnApiDelegate?.close()
             localQnnDelegate?.close()
             _lastError.value = "Interpreter init failed: ${error.message ?: "unknown error"}"
             false
         }
     }
 
-    private fun tryCreateQnnDelegate(): QnnDelegate? {
+    private fun tryCreateQnnDelegate(modelToken: String): QnnDelegate? {
         return try {
             val options = QnnDelegate.Options()
             if (nativeLibraryDir != null) {
@@ -525,7 +534,7 @@ class FrameProcessor(
             options.setLogLevel(QnnDelegate.Options.LogLevel.LOG_LEVEL_INFO)
             if (modelCacheDir != null) {
                 options.setCacheDir(modelCacheDir)
-                options.setModelToken(computeModelMd5())
+                options.setModelToken(modelToken)
             }
             options.setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND)
             options.setHtpUseConvHmx(QnnDelegate.Options.HtpUseConvHmx.HTP_CONV_HMX_ON)
@@ -550,18 +559,18 @@ class FrameProcessor(
         }
     }
 
-    private fun createQnnDelegate(): QnnDelegate? {
-        return qnnDelegateProvider?.invoke() ?: tryCreateQnnDelegate()
+    private fun createQnnDelegate(modelToken: String): QnnDelegate? {
+        return qnnDelegateProvider?.invoke() ?: tryCreateQnnDelegate(modelToken)
     }
 
-    private fun tryCreateGpuDelegate(): GpuDelegate? {
+    private fun tryCreateGpuDelegate(config: SustainedSpeedGpuDelegateConfig): GpuDelegate? {
         return try {
             val compatibility = CompatibilityList()
             if (!compatibility.isDelegateSupportedOnThisDevice) {
                 _lastError.value = "GPU delegate unsupported on this device"
                 return null
             }
-            buildSustainedSpeedGpuDelegate()
+            buildSustainedSpeedGpuDelegate(config)
         } catch (error: Throwable) {
             _lastError.value =
                 "GPU delegate init failed: ${error.message ?: "unknown error"}"
@@ -569,8 +578,12 @@ class FrameProcessor(
         }
     }
 
-    private fun createGpuDelegate(): GpuDelegate? {
-        return gpuDelegateProvider?.invoke() ?: tryCreateGpuDelegate()
+    private fun createGpuDelegate(modelToken: String): GpuDelegate? {
+        val config = sustainedSpeedGpuDelegateConfig(
+            cacheDir = modelCacheDir,
+            modelToken = modelToken
+        )
+        return gpuDelegateProvider?.let { it(config) } ?: tryCreateGpuDelegate(config)
     }
 
     private fun logTfLiteRuntimeInfo(mode: InferenceMode) {
@@ -582,16 +595,27 @@ class FrameProcessor(
         Log.i(TAG, "[INIT] mode=$mode TFLite $runtimeInfo")
     }
 
-    private fun computeModelMd5(): String {
+    private fun interpreterOptionsConfigForMode(mode: InferenceMode): TfLiteInterpreterOptionsConfig =
+        TfLiteInterpreterOptionsConfig(
+            numThreads = 4,
+            allowBufferHandleOutput = true,
+            useXnnpack = if (mode == InferenceMode.CPU) true else null,
+            useNnapi = if (mode == InferenceMode.CPU) false else null
+        )
+
+    private fun Interpreter.Options.applyInterpreterOptionsConfig(
+        config: TfLiteInterpreterOptionsConfig
+    ): Interpreter.Options {
+        setNumThreads(config.numThreads)
+        setAllowBufferHandleOutput(config.allowBufferHandleOutput)
+        config.useXnnpack?.let { setUseXNNPACK(it) }
+        config.useNnapi?.let { setUseNNAPI(it) }
+        return this
+    }
+
+    private fun computeModelMd5(modelBuffer: MappedByteBuffer): String {
         return try {
-            val buffer = modelBufferProvider?.invoke(InferenceMode.QNN_NPU) ?: return "model_unknown"
-            val duplicate = buffer.duplicate()
-            duplicate.position(0)
-            val bytes = ByteArray(duplicate.remaining())
-            duplicate.get(bytes)
-            MessageDigest.getInstance("MD5")
-                .digest(bytes)
-                .joinToString(separator = "") { "%02x".format(it) }
+            computeModelBufferMd5(modelBuffer)
         } catch (_: Throwable) {
             "model_unknown"
         }
@@ -670,8 +694,6 @@ class FrameProcessor(
         interpreter = null
         gpuDelegate?.close()
         gpuDelegate = null
-        nnApiDelegate?.close()
-        nnApiDelegate = null
         if (qnnDelegateCloseActionForTest != null) {
             qnnDelegateCloseActionForTest?.invoke()
         } else {
@@ -1026,6 +1048,10 @@ class FrameProcessor(
     internal fun setApiLevelOverrideForTest(apiLevel: Int?) {
         apiLevelOverrideForTest = apiLevel
     }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun lastInterpreterOptionsConfigForTest(): TfLiteInterpreterOptionsConfig? =
+        lastInterpreterOptionsConfig.get()
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun seedQnnOutputBuffersForTest(

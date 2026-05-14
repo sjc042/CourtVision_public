@@ -95,6 +95,23 @@ class PoseLandmarkInterpreterTest {
 
         assertEquals(false, config.useGpu)
         assertEquals(4, config.cpuThreads)
+        assertEquals(true, config.useXnnpack)
+        assertEquals(false, config.useNnapi)
+        assertEquals(null, config.modelCacheDir)
+        assertEquals(null, config.modelToken)
+    }
+
+    @Test
+    fun resolveRuntimeConfig_gpuAcceptsCacheDirAndModelToken() {
+        val config = PoseLandmarkInterpreter.resolveRuntimeConfig(
+            useGpu = true,
+            modelCacheDir = "/private/cache",
+            modelToken = "pose-token"
+        )
+
+        assertEquals(true, config.useGpu)
+        assertEquals("/private/cache", config.modelCacheDir)
+        assertEquals("pose-token", config.modelToken)
     }
 
     @Test

@@ -619,8 +619,10 @@ class FrameProcessorTest {
     fun initializePoseInterpreter_whenYoloGpu_usesGpuDelegate() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val capturedUseGpu = AtomicReference<Boolean?>(null)
-        val factory = { _: MappedByteBuffer, useGpu: Boolean ->
+        val capturedCacheDir = AtomicReference<String?>()
+        val factory = { _: MappedByteBuffer, useGpu: Boolean, cacheDir: String? ->
             capturedUseGpu.set(useGpu)
+            capturedCacheDir.set(cacheDir)
             FakePoseInferenceEngine(cannedPoseResult())
         }
         val processor = FrameProcessor(
@@ -628,6 +630,7 @@ class FrameProcessorTest {
             modelBufferProvider = null,
             poseModelBufferProvider = { createMappedByteBuffer() },
             poseInterpreterFactory = factory,
+            modelCacheDir = "/private/cache",
             consumerDispatcher = dispatcher
         )
 
@@ -636,6 +639,7 @@ class FrameProcessorTest {
             processor.initializePoseInterpreterForTest()
 
             assertEquals(true, capturedUseGpu.get())
+            assertEquals("/private/cache", capturedCacheDir.get())
             assertTrue(processor.hasPoseInterpreterForTest())
         } finally {
             processor.shutdown()
@@ -646,7 +650,7 @@ class FrameProcessorTest {
     fun switchInterpreterCpuToGpu_closesAndReinitializesPose() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val created = mutableListOf<FakePoseInferenceEngine>()
-        val factory = { _: MappedByteBuffer, _: Boolean ->
+        val factory = { _: MappedByteBuffer, _: Boolean, _: String? ->
             FakePoseInferenceEngine(cannedPoseResult()).also { created.add(it) }
         }
         val processor = FrameProcessor(
@@ -671,6 +675,90 @@ class FrameProcessorTest {
             assertTrue(first.closed.get())
             assertTrue(processor.hasPoseInterpreterForTest())
             assertSame(second, created.last())
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun switchInterpreter_gpuPassesSerializationParams_whenCacheDirProvided() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val capturedConfig = AtomicReference<SustainedSpeedGpuDelegateConfig?>()
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = { createMappedByteBuffer() },
+            modelCacheDir = "/private/cache",
+            gpuDelegateProvider = { config ->
+                capturedConfig.set(config)
+                null
+            },
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            val switched = processor.switchInterpreterForTest(InferenceMode.GPU)
+            val config = checkNotNull(capturedConfig.get())
+
+            assertFalse(switched)
+            assertEquals("/private/cache", config.serializationCacheDir)
+            assertNotNull(config.serializationModelToken)
+            assertTrue(config.serializationModelToken?.isNotBlank() == true)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun switchInterpreter_cpuRecordsExplicitXnnPackFallbackIntent() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = { createMappedByteBuffer() },
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            processor.switchInterpreterForTest(InferenceMode.CPU)
+            val config = checkNotNull(processor.lastInterpreterOptionsConfigForTest())
+
+            assertEquals(4, config.numThreads)
+            assertEquals(true, config.allowBufferHandleOutput)
+            assertEquals(true, config.useXnnpack)
+            assertEquals(false, config.useNnapi)
+        } finally {
+            processor.shutdown()
+        }
+    }
+
+    @Test
+    fun switchInterpreter_nnapiDelegatesToGpuAndPreservesWarning() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val requestedModes = mutableListOf<InferenceMode>()
+        val capturedConfig = AtomicReference<SustainedSpeedGpuDelegateConfig?>()
+        val processor = FrameProcessor(
+            scope = this,
+            modelBufferProvider = { mode ->
+                requestedModes += mode
+                createMappedByteBuffer()
+            },
+            modelCacheDir = "/private/cache",
+            gpuDelegateProvider = { config ->
+                capturedConfig.set(config)
+                null
+            },
+            consumerDispatcher = dispatcher
+        )
+
+        try {
+            val switched = processor.switchInterpreterForTest(InferenceMode.NNAPI)
+
+            assertFalse(switched)
+            assertEquals(listOf(InferenceMode.GPU), requestedModes)
+            assertNotNull(capturedConfig.get())
+            assertEquals(
+                "NNAPI mode is deprecated; using GPU delegate instead",
+                processor.lastError.value
+            )
         } finally {
             processor.shutdown()
         }

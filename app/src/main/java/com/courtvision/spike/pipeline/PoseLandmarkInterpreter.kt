@@ -13,7 +13,8 @@ import org.tensorflow.lite.support.image.TensorImage
 
 class PoseLandmarkInterpreter(
     modelBuffer: MappedByteBuffer,
-    useGpu: Boolean = true
+    useGpu: Boolean = true,
+    modelCacheDir: String? = null
 ) : PoseInferenceEngine {
 
     data class OutputTensorIndices(
@@ -38,12 +39,21 @@ class PoseLandmarkInterpreter(
     private val tensorImage = TensorImage(DataType.FLOAT32)
 
     init {
-        val runtimeConfig = resolveRuntimeConfig(useGpu)
+        val runtimeConfig = resolveRuntimeConfig(
+            useGpu = useGpu,
+            modelCacheDir = modelCacheDir,
+            modelToken = computeModelBufferMd5(modelBuffer)
+        )
         val options = Interpreter.Options()
         val localDelegate = if (runtimeConfig.useGpu) {
-            buildSustainedSpeedGpuDelegate().also { options.addDelegate(it) }
+            buildSustainedSpeedGpuDelegate(
+                cacheDir = runtimeConfig.modelCacheDir,
+                modelToken = runtimeConfig.modelToken
+            ).also { options.addDelegate(it) }
         } else {
             options.setNumThreads(runtimeConfig.cpuThreads)
+            options.setUseXNNPACK(runtimeConfig.useXnnpack)
+            options.setUseNNAPI(runtimeConfig.useNnapi)
             null
         }
         delegate = localDelegate
@@ -119,14 +129,36 @@ class PoseLandmarkInterpreter(
     companion object {
         internal data class RuntimeConfig(
             val useGpu: Boolean,
-            val cpuThreads: Int
+            val cpuThreads: Int,
+            val useXnnpack: Boolean,
+            val useNnapi: Boolean,
+            val modelCacheDir: String?,
+            val modelToken: String?
         )
 
-        internal fun resolveRuntimeConfig(useGpu: Boolean): RuntimeConfig =
+        internal fun resolveRuntimeConfig(
+            useGpu: Boolean,
+            modelCacheDir: String? = null,
+            modelToken: String? = null
+        ): RuntimeConfig =
             if (useGpu) {
-                RuntimeConfig(useGpu = true, cpuThreads = 0)
+                RuntimeConfig(
+                    useGpu = true,
+                    cpuThreads = 0,
+                    useXnnpack = false,
+                    useNnapi = false,
+                    modelCacheDir = modelCacheDir?.takeIf { it.isNotBlank() },
+                    modelToken = modelToken?.takeIf { it.isNotBlank() }
+                )
             } else {
-                RuntimeConfig(useGpu = false, cpuThreads = 4)
+                RuntimeConfig(
+                    useGpu = false,
+                    cpuThreads = 4,
+                    useXnnpack = true,
+                    useNnapi = false,
+                    modelCacheDir = null,
+                    modelToken = null
+                )
             }
 
         internal fun resolveOutputIndices(outputShapes: List<IntArray>): OutputTensorIndices {
