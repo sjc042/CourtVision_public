@@ -9,10 +9,7 @@
 
 | Doc | Description |
 | --- | --- |
-| [🏀 Project Overview](project-overview.md) | High-level summary, goals, quick stats |
-| [📄 PRD](prd.md) | Product Requirements Document — features, scope, constraints |
 | [🔧 TDD](tdd.md) | Technical Design Document — architecture, ML pipeline, data models |
-| [🗂️ User Stories](user-stories.md) | Epics, user stories, acceptance criteria, delivery plan |
 
 ## Development
 
@@ -26,7 +23,8 @@
 | Doc | Description |
 | --- | --- |
 | [🚀 Phase 0 Spike Plan](phase0-spike-plan.md) | 8-day spike plan, gate criteria, evaluation protocol |
-| [Day 1-2 Plan](plans/day1-2-plan.md) | CameraX pipeline setup details |
+| [Plans](plans/) | Per-day implementation plans (Day 1 through Day 6.3) |
+| [Frame Scheduling Spec](plans/frame-scheduling-spec.md) | Frame scheduling and backpressure design |
 
 ## Tracking
 
@@ -42,6 +40,9 @@
 | [ADR-002](decisions/002-support-lib-preprocessing.md) | Use TFLite Support Library preprocessing (`ImageProcessor`) |
 | [ADR-003](decisions/003-rotation-source-of-truth.md) | Orientation-driven CameraX rotation control with stall recovery |
 | [ADR-004](decisions/004-kalman-ball-tracker.md) | Kalman ball tracker for Day 4 |
+| [ADR-005](decisions/005-sequential-gpu-inference-pipeline.md) | Sequential GPU inference pipeline |
+| [ADR-006](decisions/006-pose-gating-mode.md) | Pose gating + person-selection modes |
+| [ADR-007](decisions/007-tflite-npu-split-output-contract.md) | TFLite NPU split-output contract |
 
 ---
 

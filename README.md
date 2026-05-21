@@ -1,60 +1,131 @@
-# CourtVision Spike (Phase 0)
+# CourtVision — On-Device Basketball Tracking (Android)
 
-Minimal Android spike app for CameraX pipeline validation before YOLO integration.
+A technical spike for an Android-native basketball performance tracker that runs
+real-time shot detection **fully on-device** — no cloud, no backend. This repository
+covers **Phase 0**: proving that a CameraX → object-detection → tracking → pose
+pipeline can hit real-time latency budgets on a mid-range Android phone before any
+product architecture is committed.
 
-## What is implemented
+> **Status:** Phase 0 technical spike (Days 1–6.3 complete). Validated on a
+> Samsung Galaxy S22+ (`SM-S906U1`).
 
-- Kotlin + Compose single-module app (minSdk 26)
-- CameraX Preview + ImageAnalysis
-- Backpressure strategy: `KEEP_ONLY_LATEST`
-- Analysis target: `1280x720`
-- Async processing pipeline:
-  - bounded channel capacity = 1
-  - drop oldest on overflow
-  - simulated processing delays (0/10/20ms)
-- Runtime overlay:
-  - camera status
-  - GPU probe status
-  - analysis FPS
-  - avg/p95 analyze time
-  - dropped frame count
-  - queue depth
-  - CSV output path
-- GPU delegate compatibility probe (`GPU_SUPPORTED`, `GPU_UNSUPPORTED`, `GPU_INIT_FAILED`)
-- CSV performance logging (1-second aggregates) at:
-  - `sdcard/Android/data/com.courtvision.spike/files/benchmarks/phase0-day1-day2-<timestamp>.csv`
-  - fallback: `files/benchmarks/phase0-day1-day2-<timestamp>.csv` if external files dir is unavailable
+---
+
+## What this demonstrates
+
+- **Real-time CV pipeline on Android** — CameraX `ImageAnalysis` feeding a custom
+  5-class YOLO detector, a Kalman ball tracker, and a MediaPipe pose model, with a
+  bounded drop-oldest frame queue for backpressure.
+- **NPU acceleration** — INT8 YOLO delegated to the Qualcomm Hexagon NPU (QNN/HTP):
+  **357/357 nodes on HTP, 0% CPU fallback**.
+- **Disciplined performance engineering** — per-frame CSV instrumentation, 10-minute
+  soak tests, thermal-state slicing, and allocation-drift analysis, all under fixed
+  latency budgets.
+- **Architecture rigor** — seven Architecture Decision Records, a TDD, per-day
+  implementation plans, and a dated issues log.
+
+## Headline results (S22+, 10-min soak)
+
+| Metric                          | Result                          |
+|---------------------------------|---------------------------------|
+| YOLO inference (NPU, INT8)       | p50 **3.46 ms** / p95 3.69 ms   |
+| Pose inference (GPU)             | p95 **10.77 ms**                |
+| Frame total                     | p95 **81.4 ms**                 |
+| HTP node delegation             | 357/357 (0% fallback)           |
+| Sustained throughput            | ~14 FPS median                  |
+
+CPU-side preprocessing (~38.9 ms p50) is the dominant remaining cost — the documented
+target for the next perf workstream. Full tables, thermal trajectories, and raw CSVs
+are in [`benchmarks/phase0/`](benchmarks/phase0/) and the per-day plans under
+[`docs/plans/`](docs/plans/).
+
+---
+
+## Tech stack
+
+Kotlin · Jetpack Compose · CameraX · TensorFlow Lite (GPU + QNN/NNAPI delegates) ·
+custom-trained YOLO · MediaPipe pose · Kotlin coroutines · JUnit + MockK.
+
+## Pipeline
+
+```
+CameraX → YOLO (5-class) → Kalman ball tracker → shot state machine → metrics logger
+                        ↘ MediaPipe pose (gated) ↗
+```
+
+See [`docs/tdd.md`](docs/tdd.md) and the ADRs in [`docs/decisions/`](docs/decisions/)
+for the design rationale.
+
+---
 
 ## Model Assets Setup
 
-`pose_landmarks_detector.tflite` is not checked into the repo. Extract it from the MediaPipe
-`.task` bundle once per machine before building:
+Model weights are **not committed** to this repository. Two models are required in
+`app/src/main/assets/` before the app will build:
+
+### 1. Pose model (MediaPipe — publicly available)
+
+`pose_landmarks_detector.tflite` is extracted from the MediaPipe
+`pose_landmarker_lite` bundle:
 
 ```bash
-# 1. Download the lite variant (~4 MB FP16)
+# Download the lite variant (~4 MB FP16)
 curl -L -o pose_landmarker_lite.task \
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
 
-# 2. Extract the raw TFLite model
+# Extract the raw TFLite model from the .task bundle (it is a zip)
 cp pose_landmarker_lite.task pose_landmarker_lite.zip
 unzip pose_landmarker_lite.zip -d pose_task_extracted/
 cp pose_task_extracted/pose_landmarks_detector.tflite \
    app/src/main/assets/pose_landmarks_detector.tflite
 ```
 
-Expected file size: ~4 MB. If the build fails with a missing asset error, re-run this step.
-See [ADR-005](docs/decisions/005-sequential-gpu-inference-pipeline.md) for why the raw `.tflite`
-is used instead of the `PoseLandmarker` Task API.
+See [ADR-005](docs/decisions/005-sequential-gpu-inference-pipeline.md) for why the raw
+`.tflite` is used directly instead of the `PoseLandmarker` Task API.
 
-## Open in Android Studio
+### 2. Object detection model (custom-trained — not distributed)
 
-1. Open folder: `CourtVision_Android`
-2. Let Gradle sync download dependencies.
-3. Run on a physical Android device (camera required).
+The 5-class detector is a project-trained YOLOv11n exported to INT8 TFLite. The
+trained weights are **not redistributed**. Its contract, so the code is fully
+readable without it:
 
-## 10-minute soak test
+- **Classes (nc=5):** `ball`, `made`, `person`, `rim`, `shoot`
+- **Input:** 640×640, INT8 quantized
+- **Runtime:** QNN/HTP NPU delegate primary, GPU and XNNPACK CPU fallback
+- **Output:** split-output decoder — see
+  [ADR-007](docs/decisions/007-tflite-npu-split-output-contract.md)
 
-1. Launch app and grant camera permission.
-2. Let pipeline run for 10 minutes.
-3. Toggle delay mode `0ms`, then `20ms`.
-4. Pull CSV from app files and inspect FPS, p95, and dropped frames.
+To build and run, drop a compatible 5-class TFLite model into
+`app/src/main/assets/` and update the asset filename referenced in the pipeline
+code, or substitute any TFLite YOLO with a matching class layout.
+
+---
+
+## Build & Run
+
+1. Open the project folder in Android Studio and let Gradle sync.
+2. Provision the model assets (above).
+3. Run on a **physical Android device** (camera required; emulator not supported).
+
+---
+
+## Repository layout
+
+| Path | Contents |
+|------|----------|
+| `app/src/main/`     | Kotlin + Compose app, CV pipeline (`camera/`, `pipeline/`) |
+| `app/src/test/`     | Unit tests (JUnit + MockK) |
+| `docs/decisions/`   | Architecture Decision Records (ADR 001–007) |
+| `docs/plans/`       | Per-day implementation plans |
+| `docs/tdd.md`       | Technical design document |
+| `benchmarks/phase0/`| Raw per-frame benchmark CSVs and validation summaries |
+
+---
+
+## License & attribution
+
+This project's source is released under the [MIT License](LICENSE).
+
+The pose model is provided by Google's
+[MediaPipe](https://github.com/google-ai-edge/mediapipe) project (Apache License 2.0)
+and is downloaded at setup time — it is not redistributed here.

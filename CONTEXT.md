@@ -13,9 +13,6 @@ biomechanical metrics, and player development insights. Comparable product: Home
 
 - Platform: Android API 26+
 - Stage: Planning / Pre-Development (Phase 0 spike active)
-- Target launch: 12 months from kickoff
-- Revenue model: Freemium — free tier + premium analytics
-- **MVP scope:** see `docs/prd.md` Section 3.2 — this is the canonical definition.
 
 ---
 
@@ -260,17 +257,13 @@ IDLE → PREP (knee bend + ball held)
 | 2          | Pose integration, release angle, jump height, FSM refinement  | Spike green             |
 | 3          | AR court mapping, homography, shot heatmap                    | ARCore validation       |
 | 4          | Session history, coaching insights, drill mode                | Phase 2 stable          |
-| 5          | Freemium paywall, export, share cards                         | Phase 3 stable          |
 
 ---
 
 ## Project Documents (Local)
 
 - [📁 All Docs Index](docs/README.md)
-- [🏀 Project Overview](docs/project-overview.md)
-- [📄 PRD](docs/prd.md)
 - [🔧 TDD](docs/tdd.md)
-- [🗂️ User Stories & Features](docs/user-stories.md)
 - [🚀 Phase 0 Spike Plan](docs/phase0-spike-plan.md)
 - [💻 Dev Workflow](docs/dev-workflow.md)
 - [📋 Coding Style Guide](docs/coding-style-guide.md)

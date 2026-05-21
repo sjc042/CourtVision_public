@@ -30,11 +30,11 @@ Issues are tracked on GitHub: [sjc042/Court-Vision Issues](https://github.com/sj
 
 **Reviewed Docs**
 
-- [Project Overview](project-overview.md)
+- Project Overview *(internal — not published)*
 - [Phase 0 Spike Plan](phase0-spike-plan.md)
-- [PRD](prd.md)
+- PRD *(internal — not published)*
 - [TDD](tdd.md)
-- [User Stories](user-stories.md)
+- User Stories *(internal — not published)*
 
 **Findings (Highest Risk First)**
 

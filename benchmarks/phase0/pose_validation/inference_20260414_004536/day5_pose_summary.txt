@@ -1,0 +1,13 @@
+device=SM-S906U1
+gpu_mode=GPU
+input_size=256
+thermal_status=LIGHT
+samples=100
+success=100
+failure=0
+pose_inference_p50_ms=5.681
+pose_inference_p95_ms=10.774
+overlay_p50_ms=14.301
+overlay_p95_ms=35.369
+pose_inference_gate_s22=PASS_STRONG
+mode=sequential_yolo_warm
