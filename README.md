@@ -11,6 +11,19 @@ product architecture is committed.
 
 ---
 
+## Demo
+
+▶️ **[Watch the demo video](demo/courtvision-demo.mp4)** — live on-device detection,
+ball tracking, and the runtime performance overlay.
+
+Offline trajectory analysis derived from the tracked ball centroid:
+
+| Shot trajectory | Per-segment view | Made/miss streaks |
+|---|---|---|
+| ![trajectory](demo/trajectory.png) | ![per-segment](demo/trajectory_per_segment.png) | ![streaks](demo/miss_streak.png) |
+
+---
+
 ## What this demonstrates
 
 - **Real-time CV pipeline on Android** — CameraX `ImageAnalysis` feeding a custom
