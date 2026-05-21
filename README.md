@@ -13,7 +13,11 @@ product architecture is committed.
 
 ## Demo
 
-▶️ **[Watch the demo video](demo/courtvision-demo.mp4)** — live on-device detection,
+▶️
+
+https://github.com/user-attachments/assets/768e96cc-2225-4bfa-b70c-a8007ee2da5b
+
+ — live on-device detection,
 ball tracking, and the runtime performance overlay.
 
 Offline trajectory analysis derived from the tracked ball centroid:
